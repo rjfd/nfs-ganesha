@@ -62,6 +62,7 @@ extern __thread struct req_op_context *op_ctx;
 #include "fsal_api.h"
 #include "nfs23.h"
 #include "nfs4_acls.h"
+#include "nfs4_fs_locations.h"
 
 /**
  * @brief If we don't know how big a buffer we want for a link, use
@@ -229,7 +230,7 @@ void destroy_fsals(void);
 void emergency_cleanup_fsals(void);
 void start_fsals(void);
 
-void display_fsinfo(struct fsal_staticfsinfo_t *info);
+void display_fsinfo(struct fsal_module *fsal);
 
 int display_attrlist(struct display_buffer *dspbuf,
 		     struct attrlist *attr, bool is_obj);
@@ -321,7 +322,7 @@ fsal_status_t fsal_access(struct fsal_obj_handle *obj,
 			  fsal_accessflags_t access_type)
 {
 	return
-	    obj->obj_ops.test_access(obj, access_type, NULL, NULL, false);
+	    obj->obj_ops->test_access(obj, access_type, NULL, NULL, false);
 }
 
 fsal_status_t fsal_link(struct fsal_obj_handle *obj,
@@ -348,24 +349,6 @@ void fsal_create_set_verifier(struct attrlist *sattr, uint32_t verf_hi,
 bool fsal_create_verify(struct fsal_obj_handle *obj, uint32_t verf_hi,
 			uint32_t verf_lo);
 
-fsal_status_t fsal_read2(struct fsal_obj_handle *obj,
-			 bool bypass,
-			 struct state_t *state,
-			 uint64_t offset,
-			 size_t io_size,
-			 size_t *bytes_moved,
-			 void *buffer,
-			 bool *eof,
-			 struct io_info *info);
-fsal_status_t fsal_write2(struct fsal_obj_handle *obj,
-			  bool bypass,
-			  struct state_t *state,
-			  uint64_t offset,
-			  size_t io_size,
-			  size_t *bytes_moved,
-			  void *buffer,
-			  bool *sync,
-			  struct io_info *info);
 fsal_status_t fsal_readdir(struct fsal_obj_handle *directory, uint64_t cookie,
 			   unsigned int *nbfound, bool *eod_met,
 			   attrmask_t attrmask, helper_readdir_cb cb,
@@ -411,10 +394,16 @@ static inline fsal_status_t fsal_close(struct fsal_obj_handle *obj_hdl)
 	}
 
 	/* Return the result of close method. */
-	fsal_status_t status = obj_hdl->obj_ops.close(obj_hdl);
+	fsal_status_t status = obj_hdl->obj_ops->close(obj_hdl);
 
 	if (status.major != ERR_FSAL_NOT_OPENED) {
-		(void) atomic_dec_size_t(&open_fd_count);
+		ssize_t count;
+
+		count = atomic_dec_size_t(&open_fd_count);
+		if (count < 0) {
+			LogCrit(COMPONENT_FSAL,
+				"open_fd_count is negative: %zd", count);
+		}
 	} else {
 		/* Wasn't open.  Not an error, but shouldn't decrement */
 		status = fsalstat(ERR_FSAL_NO_ERROR, 0);
@@ -441,7 +430,7 @@ fsal_status_t fsal_commit(struct fsal_obj_handle *obj, off_t offset,
 	if ((uint64_t) len > ~(uint64_t) offset)
 		return fsalstat(ERR_FSAL_INVAL, 0);
 
-	return obj->obj_ops.commit2(obj, offset, len);
+	return obj->obj_ops->commit2(obj, offset, len);
 }
 fsal_status_t fsal_verify2(struct fsal_obj_handle *obj,
 			   fsal_verifier_t verifier);
@@ -484,6 +473,12 @@ static inline void fsal_release_attrs(struct attrlist *attrs)
 		attrs->acl = NULL;
 		attrs->valid_mask &= ~ATTR_ACL;
 	}
+
+	if (attrs->fs_locations) {
+		nfs4_fs_locations_release(attrs->fs_locations);
+		attrs->fs_locations = NULL;
+		attrs->valid_mask &= ~ATTR4_FS_LOCATIONS;
+	}
 }
 
 /**
@@ -509,8 +504,8 @@ static inline void fsal_copy_attrs(struct attrlist *dest,
 	dest->request_mask = save_request_mask;
 
 	if (pass_refs && ((save_request_mask & ATTR_ACL) != 0)) {
-		/* Pass any ACL reference to the dest, so remove from src
-		 * without adjusting the refcount.
+		/* Pass any ACL reference to the dest, so remove from
+		 * src without adjusting the refcount.
 		 */
 		src->acl = NULL;
 		src->valid_mask &= ~ATTR_ACL;
@@ -524,6 +519,17 @@ static inline void fsal_copy_attrs(struct attrlist *dest,
 		 */
 		dest->acl = NULL;
 		dest->valid_mask &= ~ATTR_ACL;
+	}
+
+	if (pass_refs && ((save_request_mask & ATTR4_FS_LOCATIONS) != 0)) {
+		src->fs_locations = NULL;
+		src->valid_mask &= ~ATTR4_FS_LOCATIONS;
+	} else if (dest->fs_locations != NULL &&
+		((save_request_mask & ATTR4_FS_LOCATIONS) != 0)) {
+		nfs4_fs_locations_get_ref(dest->fs_locations);
+	} else {
+		dest->fs_locations = NULL;
+		dest->valid_mask &= ~ATTR4_FS_LOCATIONS;
 	}
 }
 
@@ -544,7 +550,7 @@ fsal_get_changeid4(struct fsal_obj_handle *obj)
 
 	fsal_prepare_attrs(&attrs, ATTR_CHANGE | ATTR_CHGTIME);
 
-	status = obj->obj_ops.getattrs(obj, &attrs);
+	status = obj->obj_ops->getattrs(obj, &attrs);
 
 	if (FSAL_IS_ERROR(status))
 		return 0;

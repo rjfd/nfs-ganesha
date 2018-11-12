@@ -862,16 +862,19 @@ static bool do_block_init(struct config_node *blk_node,
 			errno = 0;
 			/* Try IPv6 (with mapping) first.  If this fails, fall
 			 * back on IPv4, if a v4 address was given. */
+			memset(&hints, 0, sizeof(struct addrinfo));
 			hints.ai_family = AF_INET6;
-			hints.ai_flags = AI_ADDRCONFIG | AI_V4MAPPED;
+			hints.ai_flags = AI_PASSIVE;
 			hints.ai_socktype = 0;
 			hints.ai_protocol = 0;
-			rc = getaddrinfo(item->u.ip.def, NULL, &hints, &res);
+			/* We don't actually pass "0.0.0.0" to this, so that it
+			 * gets the correct address for each address family.
+			 * AI_PASSIVE assures this. */
+			rc = getaddrinfo(NULL, "0", &hints, &res);
 
 			if (rc != 0) {
 				hints.ai_family = AF_INET;
-				rc = getaddrinfo(item->u.ip.def, NULL, &hints,
-						 &res);
+				rc = getaddrinfo(NULL, "0", &hints, &res);
 			}
 			if (rc == 0) {
 				memcpy(sock, res->ai_addr, res->ai_addrlen);
@@ -880,7 +883,7 @@ static bool do_block_init(struct config_node *blk_node,
 						  "Cannot set IP default for %s to %s because %s",
 						  item->name,
 						  item->u.ip.def,
-						  strerror(errno));
+						  gai_strerror(rc));
 				errors++;
 			}
 			if (res != NULL)

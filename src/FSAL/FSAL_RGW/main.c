@@ -50,35 +50,40 @@ static const char *module_name = "RGW";
 #define HAVE_DIRENT_OFFSETOF 0
 #endif
 
-/* filesystem info for RGW */
-static struct fsal_staticfsinfo_t default_rgw_info = {
-	.maxfilesize = INT64_MAX,
-	.maxlink = _POSIX_LINK_MAX,
-	.maxnamelen = 1024,
-	.maxpathlen = 1024,
-	.no_trunc = true,
-	.chown_restricted = false,
-	.case_insensitive = false,
-	.case_preserving = true,
-	.link_support = false,
-	.symlink_support = false,
-	.lock_support = false,
-	.lock_support_async_block = false,
-	.named_attr = true, /* XXX */
-	.unique_handles = true,
-	.lease_time = {10, 0},
-	.acl_support = false,
-	.cansettime = true,
-	.homogenous = true,
-	.supported_attrs = RGW_SUPPORTED_ATTRIBUTES,
-	.maxread = FSAL_MAXIOSIZE,
-	.maxwrite = FSAL_MAXIOSIZE,
-	.umask = 0,
-	.rename_changes_key = true,
-#if HAVE_DIRENT_OFFSETOF
-	.compute_readdir_cookie = true,
-#endif
-	.whence_is_name = true,
+/**
+ * RGW global module object.
+ */
+struct rgw_fsal_module RGWFSM = {
+	.fsal = {
+		.fs_info = {
+			.maxfilesize = INT64_MAX,
+			.maxlink = _POSIX_LINK_MAX,
+			.maxnamelen = 1024,
+			.maxpathlen = 1024,
+			.no_trunc = true,
+			.chown_restricted = false,
+			.case_insensitive = false,
+			.case_preserving = true,
+			.link_support = false,
+			.symlink_support = false,
+			.lock_support = false,
+			.lock_support_async_block = false,
+			.named_attr = true, /* XXX */
+			.unique_handles = true,
+			.acl_support = 0,
+			.cansettime = true,
+			.homogenous = true,
+			.supported_attrs = RGW_SUPPORTED_ATTRIBUTES,
+			.maxread = FSAL_MAXIOSIZE,
+			.maxwrite = FSAL_MAXIOSIZE,
+			.umask = 0,
+			.rename_changes_key = true,
+			#if HAVE_DIRENT_OFFSETOF
+				.compute_readdir_cookie = true,
+			#endif
+			.whence_is_name = true,
+		}
+	}
 };
 
 static struct config_item rgw_items[] = {
@@ -91,9 +96,7 @@ static struct config_item rgw_items[] = {
 	CONF_ITEM_STR("init_args", 1, MAXPATHLEN, NULL,
 		rgw_fsal_module, init_args),
 	CONF_ITEM_MODE("umask", 0,
-			rgw_fsal_module, fs_info.umask),
-	CONF_ITEM_MODE("xattr_access_rights", 0,
-			rgw_fsal_module, fs_info.xattr_access_rights),
+			rgw_fsal_module, fsal.fs_info.umask),
 	CONFIG_EOL
 };
 
@@ -125,7 +128,6 @@ static fsal_status_t init_config(struct fsal_module *module_in,
 	LogDebug(COMPONENT_FSAL,
 		 "RGW module setup.");
 
-	myself->fs_info = default_rgw_info;
 	(void) load_config_from_parse(config_struct,
 				      &rgw_block,
 				      myself,
@@ -134,6 +136,7 @@ static fsal_status_t init_config(struct fsal_module *module_in,
 	if (!config_error_is_harmless(err_type))
 		return fsalstat(ERR_FSAL_INVAL, 0);
 
+	display_fsinfo(&myself->fsal);
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
@@ -212,6 +215,10 @@ static fsal_status_t create_export(struct fsal_module *module_in,
 			int clen;
 
 			if (RGWFSM.conf_path) {
+				if (access(RGWFSM.conf_path, F_OK)) {
+					LogCrit(COMPONENT_FSAL,
+					"ceph.conf path does not exist");
+				}
 				clen = strlen(RGWFSM.conf_path) + 8;
 				conf_path = (char *) gsh_malloc(clen);
 				sprintf(conf_path, "--conf=%s",
@@ -289,13 +296,31 @@ static fsal_status_t create_export(struct fsal_module *module_in,
 			       &export->rgw_fs,
 			       RGW_MOUNT_FLAG_NONE);
 #else
-	rgw_status = rgw_mount2(RGWFSM.rgw,
-				export->rgw_user_id,
-				export->rgw_access_key_id,
-				export->rgw_secret_access_key,
-				op_ctx->ctx_export->fullpath,
-				&export->rgw_fs,
-				RGW_MOUNT_FLAG_NONE);
+	const char *fullpath = op_ctx->ctx_export->fullpath;
+
+	if (strcmp(fullpath, "/") && strchr(fullpath, '/') &&
+		(strchr(fullpath, '/') - fullpath) > 1) {
+		/* case : "bucket_name/dir" */
+		rgw_status = rgw_mount(RGWFSM.rgw,
+					export->rgw_user_id,
+					export->rgw_access_key_id,
+					export->rgw_secret_access_key,
+					&export->rgw_fs,
+					RGW_MOUNT_FLAG_NONE);
+	} else {
+		/* case : "/" of "bucket_name" or "/bucket_name" */
+		if (strcmp(fullpath, "/") && strchr(fullpath, '/') &&
+			(strchr(fullpath, '/') - fullpath) == 0) {
+			fullpath = op_ctx->ctx_export->fullpath + 1;
+		}
+	  rgw_status = rgw_mount2(RGWFSM.rgw,
+					export->rgw_user_id,
+					export->rgw_access_key_id,
+					export->rgw_secret_access_key,
+					fullpath,
+					&export->rgw_fs,
+					RGW_MOUNT_FLAG_NONE);
+	}
 #endif
 	if (rgw_status != 0) {
 		status.major = ERR_FSAL_SERVERFAULT;
@@ -376,9 +401,6 @@ MODULE_INIT void init(void)
 	LogDebug(COMPONENT_FSAL,
 		 "RGW module registering.");
 
-	/* register_fsal seems to expect zeroed memory. */
-	memset(myself, 0, sizeof(*myself));
-
 	if (register_fsal(myself, module_name, FSAL_MAJOR_VERSION,
 			  FSAL_MINOR_VERSION, FSAL_ID_RGW) != 0) {
 		/* The register_fsal function prints its own log
@@ -390,6 +412,9 @@ MODULE_INIT void init(void)
 	/* Set up module operations */
 	myself->m_ops.create_export = create_export;
 	myself->m_ops.init_config = init_config;
+
+	/* Initialize the fsal_obj_handle ops for FSAL RGW */
+	handle_ops_init(&RGWFSM.handle_ops);
 }
 
 /**

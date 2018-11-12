@@ -44,22 +44,18 @@
 /* Define mapping of NFS4 who name and type. */
 static struct {
 	char *string;
-	int stringlen;
 	int type;
 } whostr_2_type_map[] = {
 	{
 	.string = "OWNER@",
-	.stringlen = sizeof("OWNER@") - 1,
 	.type = FSAL_ACE_SPECIAL_OWNER,
 	},
 	{
 	.string = "GROUP@",
-	.stringlen = sizeof("GROUP@") - 1,
 	.type = FSAL_ACE_SPECIAL_GROUP,
 	},
 	{
 	.string = "EVERYONE@",
-	.stringlen = sizeof("EVERYONE@") - 1,
 	.type = FSAL_ACE_SPECIAL_EVERYONE,
 	},
 };
@@ -88,7 +84,7 @@ void nfs_SetPostOpAttr(struct fsal_obj_handle *obj,
 		pattrs = &attr_buf;
 		fsal_prepare_attrs(pattrs, ATTRS_NFS3 | ATTR_RDATTR_ERR);
 
-		(void) obj->obj_ops.getattrs(obj, pattrs);
+		(void) obj->obj_ops->getattrs(obj, pattrs);
 	}
 
 	/* Check if attributes follow and place the following attributes */
@@ -120,7 +116,7 @@ void nfs_SetPreOpAttr(struct fsal_obj_handle *obj, pre_op_attr *attr)
 
 	fsal_prepare_attrs(&attrs, ATTR_SIZE | ATTR_CTIME | ATTR_MTIME);
 
-	status = obj->obj_ops.getattrs(obj, &attrs);
+	status = obj->obj_ops->getattrs(obj, &attrs);
 
 	if (FSAL_IS_ERROR(status))
 		attr->attributes_follow = false;
@@ -448,7 +444,7 @@ static fattr_xdr_result encode_type(XDR *xdr, struct xdr_attrs_args *args)
 
 static fattr_xdr_result decode_type(XDR *xdr, struct xdr_attrs_args *args)
 {
-	uint32_t t;
+	uint32_t t = 0;
 
 	if (!xdr_u_int32_t(xdr, &t))
 		return FATTR_XDR_FAILED;
@@ -518,7 +514,7 @@ static fattr_xdr_result encode_change(XDR *xdr, struct xdr_attrs_args *args)
 
 static fattr_xdr_result decode_change(XDR *xdr, struct xdr_attrs_args *args)
 {
-	uint64_t change;
+	uint64_t change = 0;
 
 	if (!xdr_u_int64_t(xdr, &change))
 		return FATTR_XDR_FAILED;
@@ -836,9 +832,7 @@ static fattr_xdr_result decode_acl(XDR *xdr, struct xdr_attrs_args *args)
 		if (!inline_xdr_string(xdr, &buffp, MAXNAMLEN))
 			goto baderr;
 		for (i = 0; i < FSAL_ACE_SPECIAL_EVERYONE; i++) {
-			if (strncmp
-			    (buffer, whostr_2_type_map[i].string,
-			     strlen(buffer)) == 0) {
+			if (strcmp(buffer, whostr_2_type_map[i].string) == 0) {
 				who = whostr_2_type_map[i].type;
 				break;
 			}
@@ -1315,61 +1309,50 @@ void nfs4_pathname4_free(pathname4 *pathname4)
 static fattr_xdr_result encode_fs_locations(XDR *xdr,
 					    struct xdr_attrs_args *args)
 {
-	fsal_status_t st;
-	fs_locations4 fs_locs;
-	fs_location4 fs_loc;
-	component4 fs_server;
-	char server[MAXHOSTNAMELEN];
+	fs_locations4 fs_locs = {};
+	fs_location4 fs_loc = {};
 
 	if (args->data == NULL || args->data->current_obj == NULL)
 		return FATTR_XDR_NOOP;
 
-	if (args->data->current_obj->type != DIRECTORY)
-		return FATTR_XDR_NOOP;
-
-	nfs4_pathname4_alloc(&fs_locs.fs_root, NULL);
-	fs_server.utf8string_len = sizeof(server);
-	fs_server.utf8string_val = server;
-	fs_loc.server.server_len = 1;
-	fs_loc.server.server_val = &fs_server;
-	nfs4_pathname4_alloc(&fs_loc.rootpath, NULL);
-	fs_locs.locations.locations_len = 1;
-	fs_locs.locations.locations_val = &fs_loc;
-
 	/* For now allow for one fs locations, fs_locations() should set:
 	   root and update its length, can not be bigger than MAXPATHLEN
 	   path and update its length, can not be bigger than MAXPATHLEN
-	   server and update its length, can not be bigger than MAXHOSTNAMELEN
+	   server and update its length
 	*/
-	st = args->data->current_obj->obj_ops.fs_locations(
-					args->data->current_obj,
-					&fs_locs);
-	if (FSAL_IS_ERROR(st)) {
-		strcpy(fs_locs.fs_root.pathname4_val->utf8string_val,
-		       "not_supported");
-		strcpy(fs_loc.rootpath.pathname4_val->utf8string_val,
-		       "not_supported");
-		strcpy(server, "not_supported");
-		fs_locs.fs_root.pathname4_val->utf8string_len =
-			strlen(fs_locs.fs_root.pathname4_val->utf8string_val);
-		fs_loc.rootpath.pathname4_val->utf8string_len =
-			strlen(fs_loc.rootpath.pathname4_val->utf8string_val);
-		fs_server.utf8string_len = strlen(server);
 
-		LogDebug(COMPONENT_NFS_V4,
-			 "encode fs_locations obj_ops.fs_locations failed %s, %s, %s",
-			 fs_locs.fs_root.pathname4_val->utf8string_val,
-			 fs_loc.rootpath.pathname4_val->utf8string_val,
-			 server);
+	if (args->attrs->fs_locations != NULL) {
+		fsal_fs_locations_t *fs_locations = args->attrs->fs_locations;
 
+		fs_loc.server.server_len = fs_locations->nservers;
+		fs_loc.server.server_val = fs_locations->server;
+		fs_locs.locations.locations_len = 1;
+		fs_locs.locations.locations_val = &fs_loc;
+
+		nfs4_pathname4_alloc(&fs_loc.rootpath, fs_locations->rootpath);
+		nfs4_pathname4_alloc(&fs_locs.fs_root, fs_locations->fs_root);
+
+		LogDebug(COMPONENT_FSAL,
+			 "fs_location server %.*s",
+			 fs_locations->server[0].utf8string_len,
+			 fs_locations->server[0].utf8string_val);
+		LogDebug(COMPONENT_FSAL,
+			 "fs_location rootpath %s", fs_locations->rootpath);
+
+	} else {
+		LogDebug(COMPONENT_FSAL, "NULL fs_locations");
+
+		/*
+		 * If we don't have an fs_locations structure, just assume that
+		 * the fs_root corresponds to the root of the export.
+		 */
+		nfs4_pathname4_alloc(&fs_locs.fs_root,
+					op_ctx->ctx_export->pseudopath);
 	}
 
 	if (!xdr_fs_locations4(xdr, &fs_locs)) {
 		LogEvent(COMPONENT_NFS_V4,
-			 "encode fs_locations xdr_fs_locations failed %s, %s, %s",
-			 fs_locs.fs_root.pathname4_val->utf8string_val,
-			 fs_loc.rootpath.pathname4_val->utf8string_val,
-			 server);
+			 "encode fs_locations xdr_fs_locations failed");
 
 		return FATTR_XDR_FAILED;
 	}
@@ -1836,7 +1819,7 @@ static fattr_xdr_result decode_rawdev(XDR *xdr, struct xdr_attrs_args *args)
  * FATTR4_SPACE_AVAIL
  */
 
-static fattr_xdr_result encode_sace_avail(XDR *xdr,
+static fattr_xdr_result encode_space_avail(XDR *xdr,
 					   struct xdr_attrs_args *args)
 {
 	if (!args->statfscalled)
@@ -1847,7 +1830,7 @@ static fattr_xdr_result encode_sace_avail(XDR *xdr,
 	return FATTR_XDR_SUCCESS;
 }
 
-static fattr_xdr_result decode_sace_avail(XDR *xdr,
+static fattr_xdr_result decode_space_avail(XDR *xdr,
 					   struct xdr_attrs_args *args)
 {
 	return inline_xdr_u_int64_t(xdr,
@@ -1859,7 +1842,7 @@ static fattr_xdr_result decode_sace_avail(XDR *xdr,
  * FATTR4_SPACE_FREE
  */
 
-static fattr_xdr_result encode_sace_free(XDR *xdr,
+static fattr_xdr_result encode_space_free(XDR *xdr,
 					  struct xdr_attrs_args *args)
 {
 	if (!args->statfscalled)
@@ -1870,7 +1853,7 @@ static fattr_xdr_result encode_sace_free(XDR *xdr,
 	return FATTR_XDR_SUCCESS;
 }
 
-static fattr_xdr_result decode_sace_free(XDR *xdr,
+static fattr_xdr_result decode_space_free(XDR *xdr,
 					  struct xdr_attrs_args *args)
 {
 	return inline_xdr_u_int64_t(xdr,
@@ -1882,7 +1865,7 @@ static fattr_xdr_result decode_sace_free(XDR *xdr,
  * FATTR4_SPACE_TOTAL
  */
 
-static fattr_xdr_result encode_sace_total(XDR *xdr,
+static fattr_xdr_result encode_space_total(XDR *xdr,
 					   struct xdr_attrs_args *args)
 {
 	if (!args->statfscalled)
@@ -1893,7 +1876,7 @@ static fattr_xdr_result encode_sace_total(XDR *xdr,
 	return FATTR_XDR_SUCCESS;
 }
 
-static fattr_xdr_result decode_sace_total(XDR *xdr,
+static fattr_xdr_result decode_space_total(XDR *xdr,
 					   struct xdr_attrs_args *args)
 {
 	return inline_xdr_u_int64_t(xdr,
@@ -1976,7 +1959,7 @@ static inline fattr_xdr_result decode_time(XDR *xdr,
 		return FATTR_XDR_FAILED;
 	if (!inline_xdr_u_int32_t(xdr, &nseconds))
 		return FATTR_XDR_FAILED;
-	ts->tv_sec = (uint32_t) seconds;	/* !!! is this correct?? */
+	ts->tv_sec = seconds;
 	ts->tv_nsec = nseconds;
 	if (nseconds >= 1000000000) {	/* overflow */
 		args->nfs_status = NFS4ERR_INVAL;
@@ -2977,8 +2960,8 @@ const struct fattr4_dent fattr4tab[FATTR4_XATTR_SUPPORT + 1] = {
 		.supported = 1,
 		.size_fattr4 = sizeof(fattr4_space_avail),
 		.attrmask = 0,
-		.encode = encode_sace_avail,
-		.decode = decode_sace_avail,
+		.encode = encode_space_avail,
+		.decode = decode_space_avail,
 		.access = FATTR4_ATTR_READ}
 	,
 	[FATTR4_SPACE_FREE] = {
@@ -2986,8 +2969,8 @@ const struct fattr4_dent fattr4tab[FATTR4_XATTR_SUPPORT + 1] = {
 		.supported = 1,
 		.size_fattr4 = sizeof(fattr4_space_used),
 		.attrmask = 0,
-		.encode = encode_sace_free,
-		.decode = decode_sace_free,
+		.encode = encode_space_free,
+		.decode = decode_space_free,
 		.access = FATTR4_ATTR_READ}
 	,
 	[FATTR4_SPACE_TOTAL] = {
@@ -2995,8 +2978,8 @@ const struct fattr4_dent fattr4tab[FATTR4_XATTR_SUPPORT + 1] = {
 		.supported = 1,
 		.size_fattr4 = sizeof(fattr4_space_total),
 		.attrmask = 0,
-		.encode = encode_sace_total,
-		.decode = decode_sace_total,
+		.encode = encode_space_total,
+		.decode = decode_space_total,
 		.access = FATTR4_ATTR_READ}
 	,
 	[FATTR4_SPACE_USED] = {
@@ -3403,6 +3386,7 @@ void nfs4_Fattr_Free(fattr4 *fattr)
 	if (fattr->attr_vals.attrlist4_val != NULL) {
 		gsh_free(fattr->attr_vals.attrlist4_val);
 		fattr->attr_vals.attrlist4_val = NULL;
+		fattr->attr_vals.attrlist4_len = 0;
 	}
 }
 
@@ -3503,7 +3487,7 @@ nfsstat4 file_To_Fattr(compound_data_t *data,
 	args.fileid = data->current_obj->fileid;
 	args.fsid = data->current_obj->fsid;
 
-	status = data->current_obj->obj_ops.getattrs(data->current_obj, attr);
+	status = data->current_obj->obj_ops->getattrs(data->current_obj, attr);
 	if (FSAL_IS_ERROR(status))
 		return nfs4_Errno_status(status);
 
@@ -3521,58 +3505,85 @@ nfsstat4 file_To_Fattr(compound_data_t *data,
 	return NFS4_OK;
 }
 
-int nfs4_Fattr_Fill_Error(fattr4 *Fattr, nfsstat4 rdattr_error)
+
+static fattr_xdr_result decode_fattr(XDR *xdr,
+				     struct xdr_attrs_args *args,
+				     int fattr_id)
 {
-	u_int LastOffset;
-	XDR attr_body;
-	struct xdr_attrs_args args;
-	fattr_xdr_result xdr_res;
+	fattr_xdr_result res;
 
-	/* basic init */
-	memset(&Fattr->attrmask, 0, sizeof(Fattr->attrmask));
-	Fattr->attr_vals.attrlist4_val =
-	    gsh_malloc(fattr4tab[FATTR4_RDATTR_ERROR].size_fattr4);
-
-	LastOffset = 0;
-	memset(&attr_body, 0, sizeof(attr_body));
-	xdrmem_create(&attr_body, Fattr->attr_vals.attrlist4_val,
-		      fattr4tab[FATTR4_RDATTR_ERROR].size_fattr4, XDR_ENCODE);
-	memset(&args, 0, sizeof(args));
-	args.rdattr_error = rdattr_error;
-
-	xdr_res = fattr4tab[FATTR4_RDATTR_ERROR].encode(&attr_body, &args);
-	if (xdr_res == FATTR_XDR_SUCCESS) {
-		bool res = set_attribute_in_bitmap(&Fattr->attrmask,
-						   FATTR4_RDATTR_ERROR);
-		assert(res);
-		LogFullDebug(COMPONENT_NFS_V4,
-			     "Encoded attribute %d, name = %s",
-			     FATTR4_RDATTR_ERROR,
-			     fattr4tab[FATTR4_RDATTR_ERROR].name);
-
-		/* mark the attribute in the bitmap should be new bitmap btw */
-
-		LastOffset = xdr_getpos(&attr_body);	/* dumb but for now */
-		xdr_destroy(&attr_body);
-
-		if (LastOffset == 0) {	/* no supported attrs so we can free */
-			assert(Fattr->attrmask.bitmap4_len == 0);
-			gsh_free(Fattr->attr_vals.attrlist4_val);
-			Fattr->attr_vals.attrlist4_val = NULL;
-		}
-		Fattr->attr_vals.attrlist4_len = LastOffset;
-		return 0;
-	} else {
-		LogFullDebug(COMPONENT_NFS_V4,
-			     "Encode FAILED for attribute %d, name = %s",
-			     FATTR4_RDATTR_ERROR,
-			     fattr4tab[FATTR4_RDATTR_ERROR].name);
-		/* signal fail so if(LastOffset > 0) works right */
-
-		gsh_free(Fattr->attr_vals.attrlist4_val);
-		Fattr->attr_vals.attrlist4_val = NULL;
-		return -1;
+	res = fattr4tab[fattr_id].decode(xdr, args);
+	if (res != FATTR_XDR_SUCCESS) {
+		LogDebug(COMPONENT_NFS_V4, "Failed to decode %s (%d)",
+			 fattr4tab[fattr_id].name, fattr_id);
 	}
+
+	return res;
+}
+
+/*
+ * @brief Sets the FATTR4_RDATTR_ERROR in fattrs along with the other restricted
+ * attrs if requested.
+ *
+ * @param[in]		Current compound request data
+ * @param[in|out]	Attrs to be filled
+ * @param[in]		rdattr_error value
+ * @param[in]		Requested attrs bitmap mask
+ */
+
+int nfs4_Fattr_Fill_Error(compound_data_t *data, fattr4 *Fattr,
+			  nfsstat4 rdattr_error, struct bitmap4 *req_attrmask,
+			  struct xdr_attrs_args *args)
+{
+	struct bitmap4 restricted_attrmask;
+
+	memset(&restricted_attrmask, 0, sizeof(restricted_attrmask));
+
+	if (attribute_is_set(req_attrmask, FATTR4_FSID) ||
+	    attribute_is_set(req_attrmask, FATTR4_MOUNTED_ON_FILEID) ||
+	    attribute_is_set(req_attrmask, FATTR4_FS_LOCATIONS)) {
+		XDR old_attr_body;
+
+		memset(&old_attr_body, 0, sizeof(old_attr_body));
+		xdrmem_create(&old_attr_body, Fattr->attr_vals.attrlist4_val,
+				Fattr->attr_vals.attrlist4_len, XDR_DECODE);
+
+		if (attribute_is_set(&Fattr->attrmask, FATTR4_FSID)) {
+			decode_fattr(&old_attr_body, args, FATTR4_FSID);
+			set_attribute_in_bitmap(&restricted_attrmask,
+						FATTR4_FSID);
+		}
+
+		if (attribute_is_set(&Fattr->attrmask,
+			FATTR4_MOUNTED_ON_FILEID)) {
+			decode_fattr(&old_attr_body, args,
+					FATTR4_MOUNTED_ON_FILEID);
+			set_attribute_in_bitmap(&restricted_attrmask,
+					FATTR4_MOUNTED_ON_FILEID);
+		}
+
+		/*
+		 * Since fslocations are set at the time of encoding
+		 * (encode_fs_locations), we should check the requested attrmask
+		 * here and not Fattr->attrmask.
+		 */
+		if (attribute_is_set(req_attrmask, FATTR4_FS_LOCATIONS)) {
+			set_attribute_in_bitmap(&restricted_attrmask,
+						FATTR4_FS_LOCATIONS);
+		}
+
+		xdr_destroy(&old_attr_body);
+	}
+
+	/* FATTR4_RDATTR_ERROR should be set only if it is requested */
+	if (attribute_is_set(req_attrmask, FATTR4_RDATTR_ERROR)) {
+		args->rdattr_error = rdattr_error;
+		set_attribute_in_bitmap(&restricted_attrmask,
+					FATTR4_RDATTR_ERROR);
+	}
+
+	args->data = data;
+	return nfs4_FSALattr_To_Fattr(args, &restricted_attrmask, Fattr);
 }
 
 /**
@@ -3658,7 +3669,7 @@ int nfs4_FSALattr_To_Fattr(struct xdr_attrs_args *args, struct bitmap4 *Bitmap,
 				     fattr4tab[attribute_to_set].name);
 			continue;
 		} else {
-			LogFullDebug(COMPONENT_NFS_V4,
+			LogEvent(COMPONENT_NFS_V4,
 				     "Encode FAILED for attr %d, name = %s",
 				     attribute_to_set,
 				     fattr4tab[attribute_to_set].name);
@@ -3680,8 +3691,7 @@ int nfs4_FSALattr_To_Fattr(struct xdr_attrs_args *args, struct bitmap4 *Bitmap,
 	return 0;
 
  err:
-	gsh_free(Fattr->attr_vals.attrlist4_val);
-	Fattr->attr_vals.attrlist4_val = NULL;
+	nfs4_Fattr_Free(Fattr);
 	return -1;
 }
 
@@ -4482,4 +4492,98 @@ bool is_sticky_bit_set(struct fsal_obj_handle *obj,
 		 obj->fileid);
 
 	return true;
+}
+
+uint32_t resp_room(compound_data_t *data)
+{
+	uint32_t room;
+
+	if (data->minorversion == 0 || data->session == NULL) {
+		/* No response size checking */
+		return UINT32_MAX;
+	}
+
+	/* Start with max response size */
+	room = data->session->fore_channel_attrs.ca_maxresponsesize;
+
+	/* If this request is cached and maxcachesize is smaller use it. */
+	if (data->use_slot_cached_result && room >
+	    data->session->fore_channel_attrs.ca_maxresponsesize_cached) {
+		room =
+		    data->session->fore_channel_attrs.ca_maxresponsesize_cached;
+	}
+
+	/* Now subtract the space for the opnum4 for this response plus at
+	 * least one more opnum and status.
+	 */
+	room -= sizeof(nfs_opnum4) + sizeof(nfs_opnum4) + sizeof(nfsstat4);
+
+	return room;
+}
+
+nfsstat4 check_resp_room(compound_data_t *data, uint32_t op_resp_size)
+{
+	nfsstat4 status;
+	uint32_t test_response_size = data->resp_size +
+				      sizeof(nfs_opnum4) + op_resp_size +
+				      sizeof(nfs_opnum4) + sizeof(nfsstat4);
+
+	if (data->minorversion == 0 || data->session == NULL) {
+		/* No response size checking */
+		return NFS4_OK;
+	}
+
+	/* Check that op_resp_size plus nfs_opnum4 plus at least another
+	 * response (nfs_opnum4 plus nfsstat4) fits.
+	 */
+	if (test_response_size >
+	    data->session->fore_channel_attrs.ca_maxresponsesize) {
+		/* Response is larger than maximum response size. */
+		status = NFS4ERR_REP_TOO_BIG;
+		goto err;
+	}
+
+	if (!data->sa_cachethis) {
+		/* Response size is ok, and not cached. */
+		goto ok;
+	}
+
+	/* Check that op_resp_size plus nfs_opnum4 plus at least another
+	 * response (nfs_opnum4 plus nfsstat4) fits.
+	 */
+	if (test_response_size >
+	    data->session->fore_channel_attrs.ca_maxresponsesize_cached) {
+		/* Response is too big to cache. */
+		status = NFS4ERR_REP_TOO_BIG_TO_CACHE;
+		goto err;
+	}
+
+	/* Response is ok to cache. */
+
+ok:
+
+	LogFullDebug(COMPONENT_NFS_V4,
+		"Status of %s in position %d is ok so far, op response size = %"
+		PRIu32" total response size would be = %"PRIu32
+		" out of max %"PRIu32"/%"PRIu32,
+		data->opname, data->oppos,
+		op_resp_size, test_response_size,
+		data->session->fore_channel_attrs.ca_maxresponsesize,
+		data->session->fore_channel_attrs.ca_maxresponsesize_cached);
+
+	return NFS4_OK;
+
+err:
+
+	LogDebug(COMPONENT_NFS_V4,
+		 "Status of %s in position %d is %s, op response size = %"
+		 PRIu32" total response size would have been = %"PRIu32
+		 " out of max %"PRIu32"/%"PRIu32,
+		 data->opname, data->oppos,
+		 nfsstat4_to_str(status),
+		 op_resp_size, test_response_size,
+		 data->session->fore_channel_attrs.ca_maxresponsesize,
+		 data->session->fore_channel_attrs.ca_maxresponsesize_cached);
+
+	return status;
 }

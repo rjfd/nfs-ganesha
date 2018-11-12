@@ -37,6 +37,11 @@ if(USE_FSAL_VFS)
         ganesha-vfs-config.rst)
 endif()
 
+if(USE_FSAL_LUSTRE)
+   list(APPEND man_srcs
+        ganesha-lustre-config.rst)
+endif()
+
 if(USE_FSAL_PROXY)
    list(APPEND man_srcs
         ganesha-proxy-config.rst)
@@ -45,6 +50,12 @@ endif()
 if(USE_FSAL_GPFS)
    list(APPEND man_srcs
         ganesha-gpfs-config.rst)
+endif()
+
+if(USE_RADOS_RECOV)
+	list(APPEND man_srcs
+	     ganesha-rados-cluster-design.rst
+	     ganesha-rados-grace.rst)
 endif()
 
 foreach(man ${man_srcs})

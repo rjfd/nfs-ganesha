@@ -10,7 +10,6 @@
 /* private helpers from export
  */
 
-struct fsal_staticfsinfo_t *gpfs_staticinfo(struct fsal_module *hdl);
 
 /* method proto linkage to handle.c for export
  */
@@ -126,24 +125,16 @@ fsal_status_t gpfs_open2(struct fsal_obj_handle *obj_hdl,
 fsal_status_t gpfs_reopen2(struct fsal_obj_handle *obj_hdl,
 			   struct state_t *state,
 			   fsal_openflags_t openflags);
-fsal_status_t gpfs_read2(struct fsal_obj_handle *obj_hdl,
-			 bool bypass,
-			 struct state_t *state,
-			 uint64_t offset,
-			 size_t buffer_size,
-			 void *buffer,
-			 size_t *read_amount,
-			 bool *end_of_file,
-			 struct io_info *info);
-fsal_status_t gpfs_write2(struct fsal_obj_handle *obj_hdl,
-			  bool bypass,
-			  struct state_t *state,
-			  uint64_t offset,
-			  size_t buffer_size,
-			  void *buffer,
-			  size_t *wrote_amount,
-			  bool *fsal_stable,
-			  struct io_info *info);
+void gpfs_read2(struct fsal_obj_handle *obj_hdl,
+		bool bypass,
+		fsal_async_cb done_cb,
+		struct fsal_io_arg *read_arg,
+		void *caller_arg);
+void gpfs_write2(struct fsal_obj_handle *obj_hdl,
+		 bool bypass,
+		 fsal_async_cb done_cb,
+		 struct fsal_io_arg *write_arg,
+		 void *caller_arg);
 fsal_status_t gpfs_commit2(struct fsal_obj_handle *obj_hdl,
 			   off_t offset,
 			   size_t len);
@@ -164,12 +155,14 @@ fsal_status_t gpfs_read_plus_fd(int my_fs,
 			size_t buffer_size, void *buffer, size_t *read_amount,
 			bool *end_of_file, struct io_info *info, int expfd);
 fsal_status_t gpfs_seek(struct fsal_obj_handle *obj_hdl,
-			 struct io_info *info);
+			struct io_info *info);
 fsal_status_t gpfs_io_advise(struct fsal_obj_handle *obj_hdl,
 			 struct io_hints *hints);
 fsal_status_t gpfs_share_op(struct fsal_obj_handle *obj_hdl, void *p_owner,
 			    fsal_share_param_t request_share);
 fsal_status_t gpfs_close(struct fsal_obj_handle *obj_hdl);
+fsal_status_t gpfs_fallocate(struct fsal_obj_handle *obj_hdl, state_t *state,
+			     uint64_t offset, uint64_t length, bool allocate);
 
 /* Internal GPFS method linkage to export object */
 fsal_status_t

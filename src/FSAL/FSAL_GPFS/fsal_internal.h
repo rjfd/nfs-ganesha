@@ -46,6 +46,17 @@
 
 struct gpfs_filesystem;
 
+/*
+ * GPFS internal module
+ */
+struct gpfs_fsal_module {
+	struct fsal_module module;
+	struct fsal_obj_ops handle_ops;
+	struct fsal_obj_ops handle_ops_with_pnfs;
+};
+
+extern struct gpfs_fsal_module GPFS;
+
 void gpfs_handle_ops_init(struct fsal_obj_ops *ops);
 
 bool fsal_error_is_event(fsal_status_t status);
@@ -210,10 +221,10 @@ fsal_status_t GPFSFSAL_getattrs(struct fsal_export *export,
 				struct attrlist *p_object_attributes);
 
 fsal_status_t GPFSFSAL_fs_loc(struct fsal_export *export,
-				struct gpfs_filesystem *gpfs_fs,
-				const struct req_op_context *p_context,
-				struct gpfs_file_handle *p_filehandle,
-				struct fs_locations4 *fs_loc);
+			      struct gpfs_filesystem *gpfs_fs,
+			      const struct req_op_context *p_context,
+			      struct gpfs_file_handle *p_filehandle,
+			      struct attrlist *attrs);
 
 fsal_status_t GPFSFSAL_statfs(int fd,
 			      struct fsal_obj_handle *obj_hdl,
@@ -266,7 +277,7 @@ fsal_status_t GPFSFSAL_open(struct fsal_obj_handle *obj_hdl,
 fsal_status_t GPFSFSAL_read(int fd,
 			    uint64_t offset,
 			    size_t buffer_size,
-			    caddr_t buffer,
+			    void *buffer,
 			    size_t *p_read_amount,
 			    bool *p_end_of_file,
 			    int expfs);
@@ -274,7 +285,7 @@ fsal_status_t GPFSFSAL_read(int fd,
 fsal_status_t GPFSFSAL_write(int fd,
 			     uint64_t offset,
 			     size_t buffer_size,
-			     caddr_t buffer,
+			     void *buffer,
 			     size_t *p_write_amount,
 			     bool *fsal_stable,
 			     const struct req_op_context *p_context,

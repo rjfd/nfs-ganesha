@@ -1,7 +1,7 @@
 /*
  * vim:noexpandtab:shiftwidth=8:tabstop=8:
  *
- * Copyright 2015-2017 Red Hat, Inc. and/or its affiliates.
+ * Copyright 2015-2018 Red Hat, Inc. and/or its affiliates.
  * Author: Daniel Gryniewicz <dang@redhat.com>
  *
  * This program is free software; you can redistribute it and/or
@@ -43,7 +43,22 @@
 
 typedef struct mdcache_fsal_obj_handle mdcache_entry_t;
 
+struct mdcache_fsal_module {
+	struct fsal_module module;
+	struct fsal_obj_ops handle_ops;
+};
+
+extern struct mdcache_fsal_module MDCACHE;
+
 #define MDC_UNEXPORT 1
+
+/**
+ * @brief Reason an entry is being inserted/looked up
+ */
+typedef enum {
+	MDC_REASON_DEFAULT,	/**< Default insertion */
+	MDC_REASON_SCAN		/**< Is being inserted by a scan */
+} mdc_reason_t;
 
 /*
  * MDCACHE internal export
@@ -179,10 +194,10 @@ struct entry_export_map {
 #define MDCACHE_DIR_POPULATED FSAL_UP_INVALIDATE_DIR_POPULATED
 /** The directory chunks are considered valid */
 #define MDCACHE_TRUST_DIR_CHUNKS FSAL_UP_INVALIDATE_DIR_CHUNKS
+/** The fs locaitons are considered calid */
+#define MDCACHE_TRUST_FS_LOCATIONS FSAL_UP_INVALIDATE_FS_LOCATIONS
 /** The entry has been removed, but not unhashed due to state */
 static const uint32_t MDCACHE_UNREACHABLE = 0x100;
-/** The directory is too big; skip the dirent cache */
-static const uint32_t MDCACHE_BYPASS_DIRCACHE = 0x200;
 
 
 /**
@@ -248,6 +263,8 @@ struct mdcache_fsal_obj_handle {
 	time_t attr_time;
 	/** Time at which we last refreshed acl. */
 	time_t acl_time;
+	/** Time at which we last refreshed fs locations */
+	time_t fs_locations_time;
 	/** New style LRU link */
 	mdcache_lru_t lru;
 	/** Exports per entry (protected by attr_lock) */
@@ -266,7 +283,7 @@ struct mdcache_fsal_obj_handle {
 	union mdcache_fsobj {
 		struct state_hdl hdl;
 		struct {
-			/** List of chunks in this directory, not ordered */
+			/** List of chunks in this directory, ordered */
 			struct glist_head chunks;
 			/** List of detached directory entries. */
 			struct glist_head detached;
@@ -298,8 +315,6 @@ struct mdcache_fsal_obj_handle {
 			struct {
 				/** Children by name hash */
 				struct avltree t;
-				/** Persist cookies for deleted entries */
-				struct avltree c;
 				/** Table of dirents by FSAL cookie */
 				struct avltree ck;
 				/** Table of dirents in sorted order. */
@@ -320,12 +335,8 @@ struct dir_chunk {
 	struct mdcache_fsal_obj_handle *parent;
 	/** LRU link */
 	mdcache_lru_t chunk_lru;
-	/** The previous chunk, this pointer is only de-referenced during
-	 *  chunk population (where the content_lock prevents the previous
-	 *  chunk from going invalid), or used to double check but not
-	 *  de-referenced.
-	 */
-	struct dir_chunk *prev_chunk;
+	/** Cookie to use to reload this chunk */
+	fsal_cookie_t reload_ck;
 	/** Cookie of first entry in sequentially next chunk, will be set to
 	 *  0 if there is no sequentially next chunk.
 	 */
@@ -333,6 +344,10 @@ struct dir_chunk {
 	/** Number of entries in chunk */
 	int num_entries;
 };
+
+#define mdc_prev_chunk(c) glist_prev_entry(&(c)->parent->fsobj.fsdir.chunks, \
+			struct dir_chunk, chunks, &(c)->chunks)
+
 
 /**
  * @brief Represents a cached directory entry
@@ -343,6 +358,7 @@ struct dir_chunk {
 
 #define DIR_ENTRY_FLAG_NONE     0x0000
 #define DIR_ENTRY_FLAG_DELETED  0x0001
+#define DIR_ENTRY_REFFED        0x0002
 #define DIR_ENTRY_SORTED        0x0004
 
 typedef struct mdcache_dir_entry__ {
@@ -351,7 +367,7 @@ typedef struct mdcache_dir_entry__ {
 	/** The chunk this entry belongs to */
 	struct dir_chunk *chunk;
 	/** node in tree by name */
-	struct avltree_node node_hk;
+	struct avltree_node node_name;
 	/** AVL node in tree by cookie */
 	struct avltree_node node_ck;
 	/** AVL node in tree by sorted order */
@@ -364,18 +380,15 @@ typedef struct mdcache_dir_entry__ {
 	/** Indicates if this dirent is the last dirent in a chunked directory.
 	 */
 	bool eod;
-	struct {
-		/** Name Hash */
-		uint64_t k;
-		/** Number of probes, an efficiency metric */
-		uint32_t p;
-	} hk;
+	/** Name Hash */
+	uint64_t namehash;
 	/** Key of cache entry */
 	mdcache_key_t ckey;
 	/** Flags */
 	uint32_t flags;
+	const char *name;
 	/** The NUL-terminated filename */
-	char name[];
+	char name_buffer[];
 } mdcache_dir_entry_t;
 
 /**
@@ -433,24 +446,7 @@ fsal_status_t mdcache_alloc_and_check_handle(
 		struct state_t *state);
 
 fsal_status_t mdcache_refresh_attrs(mdcache_entry_t *entry, bool need_acl,
-				    bool invalidate);
-
-static inline
-void mdcache_refresh_attrs_no_invalidate(mdcache_entry_t *entry)
-{
-	fsal_status_t status;
-
-	PTHREAD_RWLOCK_wrlock(&entry->attr_lock);
-
-	status = mdcache_refresh_attrs(entry, false, false);
-
-	PTHREAD_RWLOCK_unlock(&entry->attr_lock);
-
-	if (FSAL_IS_ERROR(status)) {
-		LogDebug(COMPONENT_CACHE_INODE, "Refresh attributes failed %s",
-			 fsal_err_txt(status));
-	}
-}
+				    bool need_fslocations, bool invalidate);
 
 fsal_status_t mdcache_new_entry(struct mdcache_fsal_export *exp,
 				struct fsal_obj_handle *sub_handle,
@@ -458,8 +454,13 @@ fsal_status_t mdcache_new_entry(struct mdcache_fsal_export *exp,
 				struct attrlist *attrs_out,
 				bool new_directory,
 				mdcache_entry_t **entry,
-				struct state_t *state);
-fsal_status_t mdcache_find_keyed(mdcache_key_t *key, mdcache_entry_t **entry);
+				struct state_t *state,
+				mdc_reason_t reason);
+fsal_status_t mdcache_find_keyed_reason(mdcache_key_t *key,
+					mdcache_entry_t **entry,
+					mdc_reason_t reason);
+#define mdcache_find_keyed(key, entry) mdcache_find_keyed_reason((key), \
+					(entry), MDC_REASON_DEFAULT)
 fsal_status_t mdcache_locate_host(struct gsh_buffdesc *fh_desc,
 				  struct mdcache_fsal_export *exp,
 				  mdcache_entry_t **entry,
@@ -475,18 +476,14 @@ fsal_status_t mdc_lookup_uncached(mdcache_entry_t *mdc_parent,
 				  struct attrlist *attrs_out);
 void mdcache_src_dest_lock(mdcache_entry_t *src, mdcache_entry_t *dest);
 void mdcache_src_dest_unlock(mdcache_entry_t *src, mdcache_entry_t *dest);
-fsal_status_t mdcache_dirent_remove(mdcache_entry_t *parent, const char *name);
+void mdcache_dirent_remove(mdcache_entry_t *parent, const char *name);
 fsal_status_t mdcache_dirent_add(mdcache_entry_t *parent,
 				 const char *name,
 				 mdcache_entry_t *entry,
 				 bool *invalidate);
-fsal_status_t mdcache_dirent_rename(mdcache_entry_t *parent,
-				    const char *oldname,
-				    const char *newname);
 
 void mdcache_dirent_invalidate_all(mdcache_entry_t *entry);
 
-fsal_status_t mdcache_dirent_populate(mdcache_entry_t *dir);
 fsal_status_t mdcache_readdir_uncached(mdcache_entry_t *directory, fsal_cookie_t
 				       *whence, void *dir_state,
 				       fsal_readdir_cb cb, attrmask_t attrmask,
@@ -518,18 +515,6 @@ void mdc_update_attr_cache(mdcache_entry_t *entry, struct attrlist *attrs);
 static inline bool test_mde_flags(mdcache_entry_t *entry, uint32_t bits)
 {
 	return (atomic_fetch_uint32_t(&entry->mde_flags) & bits) == bits;
-}
-
-static inline bool mdc_dircache_trusted(mdcache_entry_t *dir)
-{
-	/* This function returns false if chunking is enabled, the only caller
-	 * that matters for chunking, mdcache_dirent_find will thus return
-	 * ERR_FSAL_NO_ERROR if an entry is not found, and it's callers will
-	 * do the right thing...
-	 */
-	return ((mdcache_param.dir.avl_chunk == 0) &&
-		test_mde_flags(dir, MDCACHE_TRUST_CONTENT |
-				    MDCACHE_DIR_POPULATED));
 }
 
 static inline struct mdcache_fsal_export *mdc_export(
@@ -589,6 +574,13 @@ extern struct config_block mdcache_param_blk;
 	op_ctx->fsal_export = &(myexp)->mfe_exp; \
 	call; \
 	op_ctx->fsal_export = (myexp)->mfe_exp.sub_export; \
+} while (0)
+
+#define supercall(call) do { \
+	struct fsal_export *save_exp = op_ctx->fsal_export; \
+	op_ctx->fsal_export = save_exp->super_export; \
+	call; \
+	op_ctx->fsal_export = save_exp; \
 } while (0)
 
 /**
@@ -712,7 +704,7 @@ mdc_fixup_md(mdcache_entry_t *entry, struct attrlist *attrs)
 	 * attributes. Note that if not all could be provided, we assumed
 	 * that an error occurred.
 	 */
-	if (attrs->request_mask & ~ATTR_ACL)
+	if (attrs->request_mask & ~(ATTR_ACL|ATTR4_FS_LOCATIONS))
 		flags |= MDCACHE_TRUST_ATTRS;
 
 	if (attrs->valid_mask == ATTR_RDATTR_ERR) {
@@ -725,19 +717,33 @@ mdc_fixup_md(mdcache_entry_t *entry, struct attrlist *attrs)
 		return;
 	}
 
+	if (attrs->request_mask & ATTR4_FS_LOCATIONS &&
+		attrs->fs_locations != NULL) {
+		flags |= MDCACHE_TRUST_FS_LOCATIONS;
+	}
+
+	time_t cur_time = time(NULL);
+
 	/* Set the refresh time for the cache entry */
 	if (flags & MDCACHE_TRUST_ACL) {
 		if (entry->attrs.expire_time_attr > 0)
-			entry->acl_time = time(NULL);
+			entry->acl_time = cur_time;
 		else
 			entry->acl_time = 0;
 	}
 
 	if (flags & MDCACHE_TRUST_ATTRS) {
 		if (entry->attrs.expire_time_attr > 0)
-			entry->attr_time = time(NULL);
+			entry->attr_time = cur_time;
 		else
 			entry->attr_time = 0;
+	}
+
+	if (flags & MDCACHE_TRUST_FS_LOCATIONS) {
+		if (entry->attrs.expire_time_attr > 0)
+			entry->fs_locations_time = cur_time;
+		else
+			entry->fs_locations_time = 0;
 	}
 
 	/* We have just loaded the attributes from the FSAL. */
@@ -755,6 +761,9 @@ mdcache_test_attrs_trust(mdcache_entry_t *entry, attrmask_t mask)
 
 	if (mask & ~ATTR_ACL)
 		flags |= MDCACHE_TRUST_ATTRS;
+
+	if (mask & ATTR4_FS_LOCATIONS)
+		flags |= MDCACHE_TRUST_FS_LOCATIONS;
 
 	/* If any of the requested attributes are not valid, return. */
 	if (!test_mde_flags(entry, flags))
@@ -956,24 +965,16 @@ fsal_openflags_t mdcache_status2(struct fsal_obj_handle *obj_hdl,
 fsal_status_t mdcache_reopen2(struct fsal_obj_handle *obj_hdl,
 			      struct state_t *state,
 			      fsal_openflags_t openflags);
-fsal_status_t mdcache_read2(struct fsal_obj_handle *obj_hdl,
-			   bool bypass,
-			   struct state_t *state,
-			   uint64_t offset,
-			   size_t buf_size,
-			   void *buffer,
-			   size_t *read_amount,
-			   bool *eof,
-			   struct io_info *info);
-fsal_status_t mdcache_write2(struct fsal_obj_handle *obj_hdl,
-			     bool bypass,
-			     struct state_t *state,
-			     uint64_t offset,
-			     size_t buf_size,
-			     void *buffer,
-			     size_t *write_amount,
-			     bool *fsal_stable,
-			     struct io_info *info);
+void mdcache_read2(struct fsal_obj_handle *obj_hdl,
+		   bool bypass,
+		   fsal_async_cb done_cb,
+		   struct fsal_io_arg *read_arg,
+		   void *caller_arg);
+void mdcache_write2(struct fsal_obj_handle *obj_hdl,
+		    bool bypass,
+		    fsal_async_cb done_cb,
+		    struct fsal_io_arg *write_arg,
+		    void *caller_arg);
 fsal_status_t mdcache_seek2(struct fsal_obj_handle *obj_hdl,
 			    struct state_t *state,
 			    struct io_info *info);
@@ -994,6 +995,9 @@ fsal_status_t mdcache_lease_op2(struct fsal_obj_handle *obj_hdl,
 				fsal_deleg_t deleg);
 fsal_status_t mdcache_close2(struct fsal_obj_handle *obj_hdl,
 			     struct state_t *state);
+fsal_status_t mdcache_fallocate(struct fsal_obj_handle *obj_hdl,
+				struct state_t *state, uint64_t offset,
+				uint64_t length, bool allocate);
 
 /* extended attributes management */
 fsal_status_t mdcache_list_ext_attrs(struct fsal_obj_handle *obj_hdl,
@@ -1007,21 +1011,22 @@ fsal_status_t mdcache_getextattr_id_by_name(struct fsal_obj_handle *obj_hdl,
 					   unsigned int *pxattr_id);
 fsal_status_t mdcache_getextattr_value_by_name(struct fsal_obj_handle *obj_hdl,
 					      const char *xattr_name,
-					      caddr_t buffer_addr,
+					      void *buffer_addr,
 					      size_t buffer_size,
 					      size_t *p_output_size);
 fsal_status_t mdcache_getextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					    unsigned int xattr_id,
-					    caddr_t buffer_addr,
+					    void *buffer_addr,
 					    size_t buffer_size,
 					    size_t *p_output_size);
 fsal_status_t mdcache_setextattr_value(struct fsal_obj_handle *obj_hdl,
 				      const char *xattr_name,
-				      caddr_t buffer_addr, size_t buffer_size,
+				      void *buffer_addr,
+				      size_t buffer_size,
 				      int create);
 fsal_status_t mdcache_setextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					    unsigned int xattr_id,
-					    caddr_t buffer_addr,
+					    void *buffer_addr,
 					    size_t buffer_size);
 fsal_status_t mdcache_remove_extattr_by_id(struct fsal_obj_handle *obj_hdl,
 					  unsigned int xattr_id);
@@ -1056,5 +1061,27 @@ fsal_status_t mdcache_export_up_ops_init(struct fsal_up_vector *my_up_ops,
 			   (key)->kv.len); \
 	LogFullDebug(COMPONENT_CACHE_INODE, "hash key: %lx", (key)->hk); \
 } while (0)
+
+static inline
+fsal_status_t mdcache_refresh_attrs_no_invalidate(mdcache_entry_t *entry)
+{
+	fsal_status_t status;
+
+	PTHREAD_RWLOCK_wrlock(&entry->attr_lock);
+
+	status = mdcache_refresh_attrs(entry, false /*need_acl*/,
+				       false /*need_fslocations*/, false);
+
+	PTHREAD_RWLOCK_unlock(&entry->attr_lock);
+
+	if (FSAL_IS_ERROR(status)) {
+		LogDebug(COMPONENT_CACHE_INODE, "Refresh attributes failed %s",
+			 fsal_err_txt(status));
+		if (status.major == ERR_FSAL_STALE)
+			mdcache_kill_entry(entry);
+	}
+
+	return status;
+}
 
 #endif /* MDCACHE_INT_H */

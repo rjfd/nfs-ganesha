@@ -98,90 +98,13 @@ static fsal_status_t get_dynamic_info(struct fsal_export *exp_hdl,
 	return fsalstat(fsal_error, 0);
 }
 
-static bool fs_supports(struct fsal_export *exp_hdl,
-			fsal_fsinfo_options_t option)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_supports(info, option);
-}
-
-static uint64_t fs_maxfilesize(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxfilesize(info);
-}
-
-static uint32_t fs_maxread(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxread(info);
-}
-
-static uint32_t fs_maxwrite(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxwrite(info);
-}
-
-static uint32_t fs_maxlink(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxlink(info);
-}
-
-static uint32_t fs_maxnamelen(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxnamelen(info);
-}
-
-static uint32_t fs_maxpathlen(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxpathlen(info);
-}
-
-static struct timespec fs_lease_time(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_lease_time(info);
-}
-
-static fsal_aclsupp_t fs_acl_support(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_acl_support(info);
-}
-
 static attrmask_t fs_supported_attrs(struct fsal_export *exp_hdl)
 {
-	struct fsal_staticfsinfo_t *info;
 	attrmask_t supported_mask;
 	struct gpfs_fsal_export *gpfs_export;
 
 	gpfs_export = container_of(exp_hdl, struct gpfs_fsal_export, export);
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-
-	supported_mask = fsal_supported_attrs(info);
+	supported_mask = fsal_supported_attrs(&exp_hdl->fsal->fs_info);
 
 	/* Fixup supported_mask to indicate if ACL is actually supported for
 	 * this export.
@@ -192,22 +115,6 @@ static attrmask_t fs_supported_attrs(struct fsal_export *exp_hdl)
 		supported_mask &= ~ATTR_ACL;
 
 	return supported_mask;
-}
-
-static uint32_t fs_umask(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_umask(info);
-}
-
-static uint32_t fs_xattr_access_rights(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = gpfs_staticinfo(exp_hdl->fsal);
-	return fsal_xattr_access_rights(info);
 }
 
 /* get_quota
@@ -470,18 +377,7 @@ void gpfs_export_ops_init(struct export_ops *ops)
 	ops->host_to_key = gpfs_host_to_key;
 	ops->create_handle = gpfs_create_handle;
 	ops->get_fs_dynamic_info = get_dynamic_info;
-	ops->fs_supports = fs_supports;
-	ops->fs_maxfilesize = fs_maxfilesize;
-	ops->fs_maxread = fs_maxread;
-	ops->fs_maxwrite = fs_maxwrite;
-	ops->fs_maxlink = fs_maxlink;
-	ops->fs_maxnamelen = fs_maxnamelen;
-	ops->fs_maxpathlen = fs_maxpathlen;
-	ops->fs_lease_time = fs_lease_time;
-	ops->fs_acl_support = fs_acl_support;
 	ops->fs_supported_attrs = fs_supported_attrs;
-	ops->fs_umask = fs_umask;
-	ops->fs_xattr_access_rights = fs_xattr_access_rights;
 	ops->get_quota = get_quota;
 	ops->set_quota = set_quota;
 	ops->alloc_state = gpfs_alloc_state;

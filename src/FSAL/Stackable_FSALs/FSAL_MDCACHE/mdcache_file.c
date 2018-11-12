@@ -1,7 +1,7 @@
 /*
  * vim:noexpandtab:shiftwidth=8:tabstop=8:
  *
- * Copyright 2015-2017 Red Hat, Inc. and/or its affiliates.
+ * Copyright 2015-2018 Red Hat, Inc. and/or its affiliates.
  * Author: Daniel Gryniewicz <dang@redhat.com>
  *
  * This program is free software; you can redistribute it and/or
@@ -38,6 +38,18 @@
 #include "mdcache.h"
 
 /**
+ * @brief Callback arg for MDCACHE async callbacks
+ *
+ * MDCACHE needs to know what its object is related to the sub-FSAL's object.
+ * This wraps the given callback arg with MDCACHE specific info
+ */
+struct mdc_async_arg {
+	struct fsal_obj_handle *obj_hdl;	/**< MDCACHE's handle */
+	fsal_async_cb cb;			/**< Wrapped callback */
+	void *cb_arg;				/**< Wrapped callback data */
+};
+
+/**
  *
  * @brief Set a timestamp to the current time
  *
@@ -63,30 +75,6 @@ mdc_set_time_current(struct timespec *time)
 	return true;
 }
 
-/**
- * @brief Seek to data or hole
- *
- * Delegate to sub-FSAL
- *
- * @param[in]  obj_hdl      File to seek in
- * @param[in,out] info      Information about the data
- *
- * @return FSAL status.
- */
-fsal_status_t mdcache_seek(struct fsal_obj_handle *obj_hdl,
-			   struct io_info *info)
-{
-	mdcache_entry_t *entry =
-		container_of(obj_hdl, mdcache_entry_t, obj_handle);
-	fsal_status_t status;
-
-	subcall(
-		status = entry->sub_handle->obj_ops.seek(entry->sub_handle,
-							 info)
-	       );
-
-	return status;
-}
 
 /**
  * @brief IO Advise
@@ -106,7 +94,7 @@ fsal_status_t mdcache_io_advise(struct fsal_obj_handle *obj_hdl,
 	fsal_status_t status;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.io_advise(
+		status = entry->sub_handle->obj_ops->io_advise(
 				entry->sub_handle, hints)
 	       );
 
@@ -127,7 +115,7 @@ fsal_status_t mdcache_close(struct fsal_obj_handle *obj_hdl)
 
 	/* XXX dang caching FDs?  How does it interact with multi-FD */
 	subcall(
-		status = entry->sub_handle->obj_ops.close(entry->sub_handle)
+		status = entry->sub_handle->obj_ops->close(entry->sub_handle)
 	       );
 
 	return status;
@@ -184,7 +172,7 @@ static fsal_status_t mdc_open2_by_name(mdcache_entry_t *mdc_parent,
 	} /* else UNGUARDED, go ahead and open the file. */
 
 	subcall(
-		status = entry->sub_handle->obj_ops.open2(
+		status = entry->sub_handle->obj_ops->open2(
 			entry->sub_handle, state, openflags, createmode,
 			NULL, attrib_set, verifier, &sub_handle,
 			attrs_out, caller_perm_check)
@@ -231,7 +219,7 @@ static fsal_status_t mdc_open2_by_name(mdcache_entry_t *mdc_parent,
 		} else if (attrs_out->request_mask & ATTR_RDATTR_ERR) {
 			/* We didn't get attributes from open2, but the caller
 			 * wants them.  Try a full getattrs() */
-			status = entry->obj_handle.obj_ops.getattrs(
+			status = entry->obj_handle.obj_ops->getattrs(
 					    &entry->obj_handle, attrs_out);
 			if (FSAL_IS_ERROR(status)) {
 				LogFullDebug(COMPONENT_CACHE_INODE,
@@ -365,8 +353,9 @@ fsal_status_t mdcache_open2(struct fsal_obj_handle *obj_hdl,
 		}
 	}
 
-	/* Ask for all supported attributes except ACL (we defer fetching ACL
-	 * until asked for it (including a permission check).
+	/* Ask for all supported attributes except ACL and FS_LOCATIONS (we
+	 * defer fetching ACL/FS_LOCATIONS until asked for it (including a
+	 * permission check).
 	 *
 	 * We can survive if we don't actually succeed in fetching the
 	 * attributes.
@@ -374,10 +363,11 @@ fsal_status_t mdcache_open2(struct fsal_obj_handle *obj_hdl,
 	fsal_prepare_attrs(&attrs,
 			   (op_ctx->fsal_export->exp_ops.fs_supported_attrs(
 							op_ctx->fsal_export)
-				& ~ATTR_ACL) | ATTR_RDATTR_ERR);
+				& ~(ATTR_ACL | ATTR4_FS_LOCATIONS)) |
+				ATTR_RDATTR_ERR);
 
 	subcall(
-		status = mdc_parent->sub_handle->obj_ops.open2(
+		status = mdc_parent->sub_handle->obj_ops->open2(
 			mdc_parent->sub_handle, state, openflags, createmode,
 			name, attrs_in, verifier, &sub_handle, &attrs,
 			caller_perm_check)
@@ -434,11 +424,12 @@ fsal_status_t mdcache_open2(struct fsal_obj_handle *obj_hdl,
 
 	fsal_release_attrs(&attrs);
 
-	if (createmode != FSAL_NO_CREATE && !invalidate) {
+	if (FSAL_IS_SUCCESS(status) && createmode != FSAL_NO_CREATE &&
+	    !invalidate) {
 		/* Refresh destination directory attributes without
 		 * invalidating dirents.
 		 */
-		mdcache_refresh_attrs_no_invalidate(mdc_parent);
+		status = mdcache_refresh_attrs_no_invalidate(mdc_parent);
 	}
 
 	return status;
@@ -460,7 +451,7 @@ bool mdcache_check_verifier(struct fsal_obj_handle *obj_hdl,
 
 	/* XXX dang caching FDs?  How does it interact with multi-FD */
 	subcall(
-		result = entry->sub_handle->obj_ops.check_verifier(
+		result = entry->sub_handle->obj_ops->check_verifier(
 				entry->sub_handle, verifier)
 	       );
 
@@ -484,7 +475,7 @@ fsal_openflags_t mdcache_status2(struct fsal_obj_handle *obj_hdl,
 	fsal_openflags_t status;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.status2(
+		status = entry->sub_handle->obj_ops->status2(
 			entry->sub_handle, state)
 	       );
 
@@ -512,7 +503,7 @@ fsal_status_t mdcache_reopen2(struct fsal_obj_handle *obj_hdl,
 	bool truncated = openflags & FSAL_O_TRUNC;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.reopen2(
+		status = entry->sub_handle->obj_ops->reopen2(
 			entry->sub_handle, state, openflags)
 	       );
 
@@ -528,47 +519,102 @@ fsal_status_t mdcache_reopen2(struct fsal_obj_handle *obj_hdl,
 }
 
 /**
+ * @brief Callback for MDCACHE read calls
+ *
+ * Unstack, and call up.
+ *
+ * @param[in] obj		Object being acted on
+ * @param[in] ret		Return status of call
+ * @param[in] obj_data		Data for call
+ * @param[in] caller_data	Data for caller
+ */
+static void mdc_read_cb(struct fsal_obj_handle *obj, fsal_status_t ret,
+			void *obj_data, void *caller_data)
+{
+	struct mdc_async_arg *arg = caller_data;
+	mdcache_entry_t *entry =
+		container_of(arg->obj_hdl, mdcache_entry_t, obj_handle);
+
+	/* Fixup FSAL_SHARE_DENIED status */
+	if (ret.major == ERR_FSAL_SHARE_DENIED)
+		ret = fsalstat(ERR_FSAL_LOCKED, 0);
+
+	supercall(
+		  arg->cb(arg->obj_hdl, ret, obj_data, arg->cb_arg);
+		 );
+
+	if (!FSAL_IS_ERROR(ret))
+		mdc_set_time_current(&entry->attrs.atime);
+	else if (ret.major == ERR_FSAL_DELAY)
+		mdcache_kill_entry(entry);
+
+	gsh_free(arg);
+}
+
+/**
  * @brief Read from a file (new style)
  *
  * Delegate to sub-FSAL
  *
- * @param[in] obj_hdl	Object owning state
- * @param[in] bypass	Bypass deny read
- * @param[in] state	Open file state to read
- * @param[in] offset	Offset into file
- * @param[in] buf_size	Size of read buffer
- * @param[in,out] buffer	Buffer to read into
- * @param[out] read_amount	Amount read in bytes
- * @param[out] eof	true if End of File was hit
- * @param[in] info	io_info for READ_PLUS
- * @return FSAL status
+ * @param[in]     obj_hdl	File on which to operate
+ * @param[in]     bypass	If state doesn't indicate a share reservation,
+ *				bypass any deny read
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] read_arg	Info about read, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
+ *
+ * @return Nothing; results are in callback
  */
-fsal_status_t mdcache_read2(struct fsal_obj_handle *obj_hdl,
-			   bool bypass,
-			   struct state_t *state,
-			   uint64_t offset,
-			   size_t buf_size,
-			   void *buffer,
-			   size_t *read_amount,
-			   bool *eof,
-			   struct io_info *info)
+void mdcache_read2(struct fsal_obj_handle *obj_hdl,
+		   bool bypass,
+		   fsal_async_cb done_cb,
+		   struct fsal_io_arg *read_arg,
+		   void *caller_arg)
 {
 	mdcache_entry_t *entry =
 		container_of(obj_hdl, mdcache_entry_t, obj_handle);
-	fsal_status_t status;
+	struct mdc_async_arg *arg;
+
+	/* Set up async callback */
+	arg = gsh_calloc(1, sizeof(*arg));
+	arg->obj_hdl = obj_hdl;
+	arg->cb = done_cb;
+	arg->cb_arg = caller_arg;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.read2(
-			entry->sub_handle, bypass, state, offset, buf_size,
-			buffer, read_amount, eof, info)
+		entry->sub_handle->obj_ops->read2(entry->sub_handle, bypass,
+						 mdc_read_cb, read_arg, arg)
 	       );
+}
 
-	if (!FSAL_IS_ERROR(status))
-		mdc_set_time_current(&entry->attrs.atime);
-	else if (status.major == ERR_FSAL_DELAY)
+/**
+ * @brief Callback for MDCACHE write calls
+ *
+ * Unstack, and call up.
+ *
+ * @param[in] obj		Object being acted on
+ * @param[in] ret		Return status of call
+ * @param[in] obj_data		Data for call
+ * @param[in] caller_data	Data for caller
+ */
+static void mdc_write_cb(struct fsal_obj_handle *obj, fsal_status_t ret,
+			void *obj_data, void *caller_data)
+{
+	struct mdc_async_arg *arg = caller_data;
+	mdcache_entry_t *entry =
+		container_of(arg->obj_hdl, mdcache_entry_t, obj_handle);
+
+	if (ret.major == ERR_FSAL_STALE)
 		mdcache_kill_entry(entry);
+	else
+		atomic_clear_uint32_t_bits(&entry->mde_flags,
+					   MDCACHE_TRUST_ATTRS);
 
-	return status;
+	supercall(
+		  arg->cb(arg->obj_hdl, ret, obj_data, arg->cb_arg);
+		 );
+
+	gsh_free(arg);
 }
 
 /**
@@ -576,44 +622,32 @@ fsal_status_t mdcache_read2(struct fsal_obj_handle *obj_hdl,
  *
  * Delegate to sub-FSAL
  *
- * @param[in] obj_hdl	Object owning state
- * @param[in] bypass	Bypass any non-mandatory deny write
- * @param[in] state	Open file state to write
- * @param[in] offset	Offset into file
- * @param[in] buf_size	Size of write buffer
- * @param[in] buffer	Buffer to write from
- * @param[out] write_amount	Amount written in bytes
- * @param[out] fsal_stable	true if write was to stable storage
- * @param[in] info	io_info for WRITE_PLUS
- * @return FSAL status
+ * @param[in] obj_hdl		Object owning state
+ * @param[in] bypass		Bypass any non-mandatory deny write
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] read_arg	Info about read, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
  */
-fsal_status_t mdcache_write2(struct fsal_obj_handle *obj_hdl,
-			     bool bypass,
-			     struct state_t *state,
-			     uint64_t offset,
-			     size_t buf_size,
-			     void *buffer,
-			     size_t *write_amount,
-			     bool *fsal_stable,
-			     struct io_info *info)
+void mdcache_write2(struct fsal_obj_handle *obj_hdl,
+		    bool bypass,
+		    fsal_async_cb done_cb,
+		    struct fsal_io_arg *write_arg,
+		    void *caller_arg)
 {
 	mdcache_entry_t *entry =
 		container_of(obj_hdl, mdcache_entry_t, obj_handle);
-	fsal_status_t status;
+	struct mdc_async_arg *arg;
+
+	/* Set up async callback */
+	arg = gsh_calloc(1, sizeof(*arg));
+	arg->obj_hdl = obj_hdl;
+	arg->cb = done_cb;
+	arg->cb_arg = caller_arg;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.write2(
-			entry->sub_handle, bypass, state, offset, buf_size,
-			buffer, write_amount, fsal_stable, info)
+		entry->sub_handle->obj_ops->write2(entry->sub_handle, bypass,
+						  mdc_write_cb, write_arg, arg)
 	       );
-
-	if (status.major == ERR_FSAL_STALE)
-		mdcache_kill_entry(entry);
-	else
-		atomic_clear_uint32_t_bits(&entry->mde_flags,
-					   MDCACHE_TRUST_ATTRS);
-
-	return status;
 }
 
 /**
@@ -635,7 +669,7 @@ fsal_status_t mdcache_seek2(struct fsal_obj_handle *obj_hdl,
 	fsal_status_t status;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.seek2(
+		status = entry->sub_handle->obj_ops->seek2(
 			entry->sub_handle, state, info)
 	       );
 
@@ -664,7 +698,7 @@ fsal_status_t mdcache_io_advise2(struct fsal_obj_handle *obj_hdl,
 	fsal_status_t status;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.io_advise2(
+		status = entry->sub_handle->obj_ops->io_advise2(
 			entry->sub_handle, state, hints)
 	       );
 
@@ -692,7 +726,7 @@ fsal_status_t mdcache_commit2(struct fsal_obj_handle *obj_hdl, off_t offset,
 	fsal_status_t status;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.commit2(
+		status = entry->sub_handle->obj_ops->commit2(
 			entry->sub_handle, offset, len)
 	       );
 
@@ -730,7 +764,7 @@ fsal_status_t mdcache_lock_op2(struct fsal_obj_handle *obj_hdl,
 	fsal_status_t status;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.lock_op2(
+		status = entry->sub_handle->obj_ops->lock_op2(
 			entry->sub_handle, state, p_owner, lock_op, req_lock,
 			conflicting_lock)
 	       );
@@ -759,7 +793,7 @@ fsal_status_t mdcache_lease_op2(struct fsal_obj_handle *obj_hdl,
 	fsal_status_t status;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.lease_op2(
+		status = entry->sub_handle->obj_ops->lease_op2(
 			entry->sub_handle, state, p_owner, deleg);
 	       );
 
@@ -781,7 +815,7 @@ fsal_status_t mdcache_close2(struct fsal_obj_handle *obj_hdl,
 	fsal_status_t status;
 
 	subcall(
-		status = entry->sub_handle->obj_ops.close2(
+		status = entry->sub_handle->obj_ops->close2(
 			  entry->sub_handle, state)
 	       );
 
@@ -790,6 +824,30 @@ fsal_status_t mdcache_close2(struct fsal_obj_handle *obj_hdl,
 		/* Entry was marked unreachable, and last state is gone */
 		(void)mdcache_kill_entry(entry);
 	}
+
+	return status;
+}
+
+fsal_status_t mdcache_fallocate(struct fsal_obj_handle *obj_hdl,
+				struct state_t *state, uint64_t offset,
+				uint64_t length, bool allocate)
+{
+	mdcache_entry_t *entry =
+		container_of(obj_hdl, mdcache_entry_t, obj_handle);
+	fsal_status_t status;
+
+	subcall(
+		status = entry->sub_handle->obj_ops->fallocate(
+							entry->sub_handle,
+							state, offset, length,
+							allocate);
+	       );
+
+	if (status.major == ERR_FSAL_STALE)
+		mdcache_kill_entry(entry);
+	else
+		atomic_clear_uint32_t_bits(&entry->mde_flags,
+					   MDCACHE_TRUST_ATTRS);
 
 	return status;
 }

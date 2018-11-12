@@ -158,6 +158,8 @@ void LogMallocFailure(const char *file, int line, const char *function,
 int read_log_config(config_file_t in_config,
 		    struct config_error_type *err_type);
 
+void gsh_backtrace(void);
+
 /* These functions display a timeval or timespec into the display buffer
  * in the same format used for logging timestamp.
  */
@@ -382,6 +384,26 @@ LogFullDebugOpaque(component, format, buf_size, value, length, args...) \
 /* Use either the first component, or if it is not at least at level,
  * use the second component.
  */
+#define LogEventAlt(comp1, comp2, format, args...) \
+	do { \
+		if (unlikely(component_log_level[comp1] \
+		    >= NIV_EVENT) || \
+		    unlikely(component_log_level[comp2] \
+		    >= NIV_EVENT)) { \
+			log_components_t component = \
+			    component_log_level[comp1] \
+				>= NIV_EVENT ? comp1 : comp2; \
+			\
+			DisplayLogComponentLevel(component,  __FILE__, \
+						 __LINE__, \
+						 __func__, \
+						 NIV_EVENT, \
+						 "%s: EVENT: " format, \
+						 LogComponents[component] \
+						     .comp_str, ## args); \
+		} \
+	} while (0)
+
 #define LogInfoAlt(comp1, comp2, format, args...) \
 	do { \
 		if (unlikely(component_log_level[comp1] \

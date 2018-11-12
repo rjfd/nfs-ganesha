@@ -151,7 +151,7 @@ static fsal_status_t lookup(struct fsal_obj_handle *parent,
 	}
 
 	construct_handle(glfs_export, &sb, glhandle, globjhdl,
-			 GLAPI_HANDLE_LENGTH, &objhandle, vol_uuid);
+			 &objhandle, vol_uuid);
 
 	if (attrs_out != NULL) {
 		posix2fsal_attributes_all(&sb, attrs_out);
@@ -182,9 +182,7 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 	int rc = 0;
 	fsal_status_t status = { ERR_FSAL_NO_ERROR, 0 };
 	struct glfs_fd *glfd = NULL;
-	off_t seekloc = 0;
-	fsal_cookie_t cookie;
-	bool skip_first;
+	long offset = 0;
 	struct dirent *pde = NULL;
 	struct glusterfs_export *glfs_export =
 	    container_of(op_ctx->fsal_export, struct glusterfs_export, export);
@@ -196,6 +194,8 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 	struct glfs_xreaddirp_stat *xstat = NULL;
 	uint32_t flags =
 		 (GFAPI_XREADDIRP_STAT | GFAPI_XREADDIRP_HANDLE);
+	struct glfs_object *tmp = NULL;
+	struct stat *sb;
 #endif
 
 #ifdef GLTIMING
@@ -218,18 +218,9 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 		return gluster2fsal_error(errno);
 
 	if (whence != NULL)
-		seekloc = (off_t) *whence;
-	cookie = seekloc;
+		offset = *whence;
 
-	/* If we don't start from beginning skip an entry */
-	skip_first = cookie != 0;
-
-	if (cookie == 0) {
-		/* Return a non-zero cookie for the first file. */
-		cookie = FIRST_COOKIE;
-	}
-
-	glfs_seekdir(glfd, seekloc);
+	glfs_seekdir(glfd, offset);
 
 	while (!(*eof)) {
 		struct dirent de;
@@ -270,18 +261,8 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 				xstat = NULL;
 			}
 #endif
-			goto skip;
+			continue;
 		}
-
-		/* If this is the first dirent found after a restarted readdir,
-		 * we actually just fetched the last dirent from the previous
-		 * call so we skip it.
-		 */
-		if (skip_first) {
-			skip_first = false;
-			goto skip;
-		}
-
 		fsal_prepare_attrs(&attrs, attrmask);
 
 #ifndef USE_GLUSTER_XREADDIRPLUS
@@ -289,9 +270,6 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 		if (FSAL_IS_ERROR(status))
 			goto out;
 #else
-		struct glfs_object *tmp = NULL;
-		struct stat *sb;
-
 		if (!xstat || !(rc & GFAPI_XREADDIRP_HANDLE)) {
 			status = gluster2fsal_error(errno);
 			goto out;
@@ -321,17 +299,14 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 			goto out;
 		}
 #endif
-		cb_rc = cb(de.d_name, obj, &attrs, dir_state, cookie);
+		cb_rc = cb(de.d_name, obj, &attrs,
+			   dir_state, glfs_telldir(glfd));
 
 		fsal_release_attrs(&attrs);
 
 		/* Read ahead not supported by this FSAL. */
 		if (cb_rc >= DIR_READAHEAD)
 			goto out;
-
-skip:
-		/* Save this telldir result for the next cookie */
-		cookie = (fsal_cookie_t) glfs_telldir(glfd);
 	}
 
  out:
@@ -412,7 +387,7 @@ static fsal_status_t makedir(struct fsal_obj_handle *dir_hdl,
 	}
 
 	construct_handle(glfs_export, &sb, glhandle, globjhdl,
-			 GLAPI_HANDLE_LENGTH, &objhandle, vol_uuid);
+			 &objhandle, vol_uuid);
 
 	if (attrs_out != NULL) {
 		posix2fsal_attributes_all(&sb, attrs_out);
@@ -427,14 +402,14 @@ static fsal_status_t makedir(struct fsal_obj_handle *dir_hdl,
 		/* Now per support_ex API, if there are any other attributes
 		 * set, go ahead and get them set now.
 		 */
-		status = (*handle)->obj_ops.setattr2(*handle, false, NULL,
+		status = (*handle)->obj_ops->setattr2(*handle, false, NULL,
 						     attrib);
 		if (FSAL_IS_ERROR(status)) {
 			/* Release the handle we just allocated. */
 			LogFullDebug(COMPONENT_FSAL,
 				     "setattr2 status=%s",
 				     fsal_err_txt(status));
-			(*handle)->obj_ops.release(*handle);
+			(*handle)->obj_ops->release(*handle);
 			/* We released handle at this point */
 			glhandle = NULL;
 			*handle = NULL;
@@ -538,7 +513,7 @@ static fsal_status_t makenode(struct fsal_obj_handle *dir_hdl,
 	}
 
 	construct_handle(glfs_export, &sb, glhandle, globjhdl,
-			 GLAPI_HANDLE_LENGTH, &objhandle, vol_uuid);
+			 &objhandle, vol_uuid);
 
 	if (attrs_out != NULL) {
 		posix2fsal_attributes_all(&sb, attrs_out);
@@ -553,14 +528,14 @@ static fsal_status_t makenode(struct fsal_obj_handle *dir_hdl,
 		/* Now per support_ex API, if there are any other attributes
 		 * set, go ahead and get them set now.
 		 */
-		status = (*handle)->obj_ops.setattr2(*handle, false, NULL,
+		status = (*handle)->obj_ops->setattr2(*handle, false, NULL,
 						     attrib);
 		if (FSAL_IS_ERROR(status)) {
 			/* Release the handle we just allocated. */
 			LogFullDebug(COMPONENT_FSAL,
 				     "setattr2 status=%s",
 				     fsal_err_txt(status));
-			(*handle)->obj_ops.release(*handle);
+			(*handle)->obj_ops->release(*handle);
 			/* We released handle at this point */
 			glhandle = NULL;
 			*handle = NULL;
@@ -639,7 +614,7 @@ static fsal_status_t makesymlink(struct fsal_obj_handle *dir_hdl,
 	}
 
 	construct_handle(glfs_export, &sb, glhandle, globjhdl,
-			 GLAPI_HANDLE_LENGTH, &objhandle, vol_uuid);
+			 &objhandle, vol_uuid);
 
 	if (attrs_out != NULL) {
 		posix2fsal_attributes_all(&sb, attrs_out);
@@ -651,14 +626,14 @@ static fsal_status_t makesymlink(struct fsal_obj_handle *dir_hdl,
 		/* Now per support_ex API, if there are any other attributes
 		 * set, go ahead and get them set now.
 		 */
-		status = (*handle)->obj_ops.setattr2(*handle, false, NULL,
+		status = (*handle)->obj_ops->setattr2(*handle, false, NULL,
 						     attrib);
 		if (FSAL_IS_ERROR(status)) {
 			/* Release the handle we just allocated. */
 			LogFullDebug(COMPONENT_FSAL,
 				     "setattr2 status=%s",
 				     fsal_err_txt(status));
-			(*handle)->obj_ops.release(*handle);
+			(*handle)->obj_ops->release(*handle);
 			/* We released handle at this point */
 			glhandle = NULL;
 			*handle = NULL;
@@ -1232,14 +1207,11 @@ fsal_status_t find_fd(struct glusterfs_fd *my_fd,
 	*/
 	if (reusing_open_state_fd) {
 		my_fd->glfd = glfs_dup(tmp2_fd->glfd);
-		my_fd->creds.caller_garray =
-			gsh_malloc(my_fd->creds.caller_glen *
-				   sizeof(gid_t));
-
-		memcpy(my_fd->creds.caller_garray,
-		       op_ctx->creds->caller_garray,
-		       op_ctx->creds->caller_glen *
-		       sizeof(gid_t));
+		if (tmp2_fd->creds.caller_glen)
+			my_fd->creds.caller_garray =
+				gsh_memdup(tmp2_fd->creds.caller_garray,
+					   tmp2_fd->creds.caller_glen *
+					   sizeof(gid_t));
 	} else {
 		my_fd->glfd = tmp2_fd->glfd;
 		my_fd->creds.caller_garray = tmp2_fd->creds.caller_garray;
@@ -1554,7 +1526,7 @@ static fsal_status_t glusterfs_open2(struct fsal_obj_handle *obj_hdl,
 
 	if (createmode == FSAL_NO_CREATE) {
 		/* lookup if the object exists */
-		status = (obj_hdl)->obj_ops.lookup(obj_hdl,
+		status = (obj_hdl)->obj_ops->lookup(obj_hdl,
 						   name,
 						   new_obj,
 						   attrs_out);
@@ -1659,7 +1631,7 @@ static fsal_status_t glusterfs_open2(struct fsal_obj_handle *obj_hdl,
 	}
 
 	construct_handle(glfs_export, &sb, glhandle, globjhdl,
-			 GLAPI_HANDLE_LENGTH, &myself, vol_uuid);
+			 &myself, vol_uuid);
 
 	*new_obj = &myself->handle;
 
@@ -1687,7 +1659,7 @@ open:
 		 * Note that we only set the attributes if we were responsible
 		 * for creating the file and we have attributes to set.
 		 */
-		status = (*new_obj)->obj_ops.setattr2(*new_obj,
+		status = (*new_obj)->obj_ops->setattr2(*new_obj,
 						      false,
 						      state,
 						      attrib_set);
@@ -1696,7 +1668,7 @@ open:
 			goto fileerr;
 
 		if (attrs_out != NULL) {
-			status = (*new_obj)->obj_ops.getattrs(*new_obj,
+			status = (*new_obj)->obj_ops->getattrs(*new_obj,
 							      attrs_out);
 			if (FSAL_IS_ERROR(status) &&
 			    (attrs_out->request_mask & ATTR_RDATTR_ERR) == 0) {
@@ -1738,16 +1710,16 @@ open:
 
 fileerr:
 	/* Avoiding use after freed, make sure close my_fd before
-	 * obj_ops.release(), glfs_close is called depends on
+	 * obj_ops->release(), glfs_close is called depends on
 	 * FSAL_O_CLOSED flags, it's harmless of closing my_fd twice
-	 * in the floowing obj_ops.release().
+	 * in the floowing obj_ops->release().
 	 */
 	glusterfs_close_my_fd(my_fd);
 
 direrr:
 	/* Release the handle we just allocated. */
 	if (*new_obj) {
-		(*new_obj)->obj_ops.release(*new_obj);
+		(*new_obj)->obj_ops->release(*new_obj);
 		/* We released handle at this point */
 		glhandle = NULL;
 		*new_obj = NULL;
@@ -1865,14 +1837,11 @@ static fsal_status_t glusterfs_reopen2(struct fsal_obj_handle *obj_hdl,
 /* read2
  */
 
-static fsal_status_t glusterfs_read2(struct fsal_obj_handle *obj_hdl,
-				     bool bypass,
-				     struct state_t *state,
-				     uint64_t seek_descriptor,
-				     size_t buffer_size,
-				     void *buffer, size_t *read_amount,
-				     bool *end_of_file,
-				     struct io_info *info)
+static void glusterfs_read2(struct fsal_obj_handle *obj_hdl,
+			    bool bypass,
+			    fsal_async_cb done_cb,
+			    struct fsal_io_arg *read_arg,
+			    void *caller_arg)
 {
 	struct glusterfs_fd my_fd = {0};
 	ssize_t nb_read;
@@ -1883,10 +1852,15 @@ static fsal_status_t glusterfs_read2(struct fsal_obj_handle *obj_hdl,
 	struct glusterfs_export *glfs_export =
 	    container_of(op_ctx->fsal_export, struct glusterfs_export, export);
 	struct glusterfs_fd *glusterfs_fd = NULL;
+	size_t total_size = 0;
+	uint64_t seek_descriptor = read_arg->offset;
+	int i;
 
-	if (info != NULL) {
+	if (read_arg->info != NULL) {
 		/* Currently we don't support READ_PLUS */
-		return fsalstat(ERR_FSAL_NOTSUPP, 0);
+		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), read_arg,
+			caller_arg);
+		return;
 	}
 
 #if 0
@@ -1902,15 +1876,16 @@ static fsal_status_t glusterfs_read2(struct fsal_obj_handle *obj_hdl,
 	/* Acquire state's fdlock to prevent OPEN upgrade closing the
 	 * file descriptor while we use it.
 	 */
-	if (state) {
-		glusterfs_fd = &container_of(state, struct glusterfs_state_fd,
+	if (read_arg->state) {
+		glusterfs_fd = &container_of(read_arg->state,
+					     struct glusterfs_state_fd,
 					     state)->glusterfs_fd;
 
 		PTHREAD_RWLOCK_rdlock(&glusterfs_fd->fdlock);
 	}
 
 	/* Get a usable file descriptor */
-	status = find_fd(&my_fd, obj_hdl, bypass, state, FSAL_O_READ,
+	status = find_fd(&my_fd, obj_hdl, bypass, read_arg->state, FSAL_O_READ,
 			 &has_lock, &closefd, false);
 
 	if (FSAL_IS_ERROR(status))
@@ -1921,8 +1896,9 @@ static fsal_status_t glusterfs_read2(struct fsal_obj_handle *obj_hdl,
 			  op_ctx->creds->caller_glen,
 			  op_ctx->creds->caller_garray);
 
-	nb_read = glfs_pread(my_fd.glfd, buffer, buffer_size,
-			     seek_descriptor, 0);
+	/* XXX dang switch to preadv_async once async supported */
+	nb_read = glfs_preadv(my_fd.glfd, read_arg->iov, read_arg->iov_count,
+			      seek_descriptor, 0);
 
 	/* restore credentials */
 	SET_GLUSTER_CREDS(glfs_export, NULL, NULL, 0, NULL);
@@ -1933,10 +1909,14 @@ static fsal_status_t glusterfs_read2(struct fsal_obj_handle *obj_hdl,
 		goto out;
 	}
 
-	*read_amount = nb_read;
+	read_arg->io_amount = nb_read;
 
-	if (nb_read < buffer_size)
-		*end_of_file = true;
+	for (i = 0; i < read_arg->iov_count; i++) {
+		total_size += read_arg->iov[i].iov_len;
+	}
+
+	if (nb_read < total_size)
+		read_arg->end_of_file = true;
 #if 0
 	/** @todo
 	 *
@@ -1964,22 +1944,17 @@ static fsal_status_t glusterfs_read2(struct fsal_obj_handle *obj_hdl,
 	if (has_lock)
 		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
 
-	return status;
-
+	done_cb(obj_hdl, status, read_arg, caller_arg);
 }
 
 /* write2
  */
 
-static fsal_status_t glusterfs_write2(struct fsal_obj_handle *obj_hdl,
-				      bool bypass,
-				      struct state_t *state,
-				      uint64_t seek_descriptor,
-				      size_t buffer_size,
-				      void *buffer,
-				      size_t *write_amount,
-				      bool *fsal_stable,
-				      struct io_info *info)
+static void glusterfs_write2(struct fsal_obj_handle *obj_hdl,
+			     bool bypass,
+			     fsal_async_cb done_cb,
+			     struct fsal_io_arg *write_arg,
+			     void *caller_arg)
 {
 	ssize_t nb_written;
 	fsal_status_t status;
@@ -1992,9 +1967,11 @@ static fsal_status_t glusterfs_write2(struct fsal_obj_handle *obj_hdl,
 	     container_of(op_ctx->fsal_export, struct glusterfs_export, export);
 	struct glusterfs_fd *glusterfs_fd = NULL;
 
-	if (info != NULL) {
+	if (write_arg->info != NULL) {
 		/* Currently we don't support WRITE_PLUS */
-		return fsalstat(ERR_FSAL_NOTSUPP, 0);
+		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), write_arg,
+			caller_arg);
+		return;
 	}
 
 #if 0
@@ -2010,15 +1987,16 @@ static fsal_status_t glusterfs_write2(struct fsal_obj_handle *obj_hdl,
 	/* Acquire state's fdlock to prevent OPEN upgrade closing the
 	 * file descriptor while we use it.
 	 */
-	if (state) {
-		glusterfs_fd = &container_of(state, struct glusterfs_state_fd,
+	if (write_arg->state) {
+		glusterfs_fd = &container_of(write_arg->state, struct
+					     glusterfs_state_fd,
 					     state)->glusterfs_fd;
 
 		PTHREAD_RWLOCK_rdlock(&glusterfs_fd->fdlock);
 	}
 
 	/* Get a usable file descriptor */
-	status = find_fd(&my_fd, obj_hdl, bypass, state, openflags,
+	status = find_fd(&my_fd, obj_hdl, bypass, write_arg->state, openflags,
 			 &has_lock, &closefd, false);
 
 	if (FSAL_IS_ERROR(status))
@@ -2029,8 +2007,10 @@ static fsal_status_t glusterfs_write2(struct fsal_obj_handle *obj_hdl,
 			  op_ctx->creds->caller_glen,
 			  op_ctx->creds->caller_garray);
 
-	nb_written = glfs_pwrite(my_fd.glfd, buffer, buffer_size,
-			     seek_descriptor, ((*fsal_stable) ? O_SYNC : 0));
+	/* XXX dang switch to pwritev_async once async supported */
+	nb_written = glfs_pwritev(my_fd.glfd, write_arg->iov,
+				  write_arg->iov_count, write_arg->offset,
+				  (write_arg->fsal_stable ? O_SYNC : 0));
 
 	/* restore credentials */
 	SET_GLUSTER_CREDS(glfs_export, NULL, NULL, 0, NULL);
@@ -2041,7 +2021,7 @@ static fsal_status_t glusterfs_write2(struct fsal_obj_handle *obj_hdl,
 		goto out;
 	}
 
-	*write_amount = nb_written;
+	write_arg->io_amount = nb_written;
 
  out:
 
@@ -2054,8 +2034,103 @@ static fsal_status_t glusterfs_write2(struct fsal_obj_handle *obj_hdl,
 	if (has_lock)
 		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
 
+	done_cb(obj_hdl, status, write_arg, caller_arg);
+}
+
+/**
+ * @brief Implements GLUSTER FSAL objectoperation seek (DATA/HOLE)
+ * seek2
+ */
+static fsal_status_t seek2(struct fsal_obj_handle *obj_hdl,
+				struct state_t *state,
+				struct io_info *info)
+{
+	off_t ret = 0, offset = info->io_content.hole.di_offset;
+	int what = 0;
+	bool has_lock = false;
+	bool closefd = false;
+	fsal_openflags_t openflags = FSAL_O_ANY;
+	fsal_status_t status = { ERR_FSAL_NO_ERROR, 0 };
+	struct glusterfs_fd my_fd = {0};
+	struct stat sbuf = {0};
+	struct glusterfs_export *glfs_export =
+	   container_of(op_ctx->fsal_export, struct glusterfs_export, export);
+
+#ifdef GLTIMING
+	struct timespec s_time, e_time;
+
+	now(&s_time);
+#endif
+
+	/* Get a usable file descriptor */
+	status = find_fd(&my_fd, obj_hdl, false, state, openflags,
+		&has_lock, &closefd, false);
+
+	if (FSAL_IS_ERROR(status))
+		goto out;
+
+	ret = glfs_fstat(my_fd.glfd, &sbuf);
+	if (ret != 0) {
+		if (errno == EBADF)
+			errno = ESTALE;
+		status = gluster2fsal_error(errno);
+		goto out;
+	}
+
+	/* RFC7862 15.11.3,
+	 * If the sa_offset is beyond the end of the file,
+	 * then SEEK MUST return NFS4ERR_NXIO. */
+	if (offset >= sbuf.st_size) {
+		status = gluster2fsal_error(ENXIO);
+		goto out;
+	}
+
+	SET_GLUSTER_CREDS(glfs_export, &op_ctx->creds->caller_uid,
+			&op_ctx->creds->caller_gid,
+			op_ctx->creds->caller_glen,
+			op_ctx->creds->caller_garray);
+
+	if (info->io_content.what == NFS4_CONTENT_DATA) {
+		what = SEEK_DATA;
+	} else if (info->io_content.what == NFS4_CONTENT_HOLE) {
+		what = SEEK_HOLE;
+	} else {
+		status = fsalstat(ERR_FSAL_UNION_NOTSUPP, 0);
+		goto out;
+	}
+
+	ret = glfs_lseek(my_fd.glfd, offset, what);
+
+	 /* restore credentials */
+	SET_GLUSTER_CREDS(glfs_export, NULL, NULL, 0, NULL);
+
+	if (ret < 0) {
+		if (errno == ENXIO) {
+			info->io_eof = TRUE;
+		} else {
+			status = gluster2fsal_error(errno);
+		}
+		goto out;
+	} else {
+		info->io_eof = (ret >= sbuf.st_size) ? TRUE : FALSE;
+		info->io_content.hole.di_offset = ret;
+	}
+
+ out:
+#ifdef GLTIMING
+	now(&e_time);
+	latency_update(&s_time, &e_time, lat_file_seek);
+#endif
+
+	if (closefd)
+		glusterfs_close_my_fd(&my_fd);
+
+	if (has_lock)
+		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
 	return status;
 }
+
 
 /* commit2
  */
@@ -2094,8 +2169,11 @@ static fsal_status_t glusterfs_commit2(struct fsal_obj_handle *obj_hdl,
 				  &op_ctx->creds->caller_gid,
 				  op_ctx->creds->caller_glen,
 				  op_ctx->creds->caller_garray);
-
+#ifdef USE_GLUSTER_STAT_FETCH_API
+		retval = glfs_fsync(out_fd->glfd, NULL, NULL);
+#else
 		retval = glfs_fsync(out_fd->glfd);
+#endif
 
 		if (retval == -1) {
 			retval = errno;
@@ -2407,9 +2485,12 @@ static fsal_status_t glusterfs_setattr2(struct fsal_obj_handle *obj_hdl,
 				  &op_ctx->creds->caller_gid,
 				  op_ctx->creds->caller_glen,
 				  op_ctx->creds->caller_garray);
-
+#ifdef USE_GLUSTER_STAT_FETCH_API
+		retval = glfs_ftruncate(my_fd.glfd, attrib_set->filesize,
+					NULL, NULL);
+#else
 		retval = glfs_ftruncate(my_fd.glfd, attrib_set->filesize);
-
+#endif
 		SET_GLUSTER_CREDS(glfs_export, NULL, NULL, 0, NULL);
 
 		if (retval != 0) {
@@ -2618,7 +2699,7 @@ static fsal_status_t getextattr_value_by_name(struct fsal_obj_handle *obj_hdl,
 					      const struct
 					      req_op_context *opctx,
 					      const char *xattr_name,
-					      caddr_t buffer_addr,
+					      void *buffer_addr,
 					      size_t buffer_size,
 					      size_t * p_output_size)
 {
@@ -2632,7 +2713,7 @@ static fsal_status_t getextattr_value_by_name(struct fsal_obj_handle *obj_hdl,
 static fsal_status_t getextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					    const struct req_op_context *opctx,
 					    unsigned int xattr_id,
-					    caddr_t buffer_addr,
+					    void *buffer_addr,
 					    size_t buffer_size,
 					    size_t *p_output_size)
 {
@@ -2646,7 +2727,7 @@ static fsal_status_t getextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 static fsal_status_t setextattr_value(struct fsal_obj_handle *obj_hdl,
 				      const struct req_op_context *opctx,
 				      const char *xattr_name,
-				      caddr_t buffer_addr,
+				      void *buffer_addr,
 				      size_t buffer_size,
 				      int create)
 {
@@ -2660,7 +2741,7 @@ static fsal_status_t setextattr_value(struct fsal_obj_handle *obj_hdl,
 static fsal_status_t setextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					    const struct req_op_context *opctx,
 					    unsigned int xattr_id,
-					    caddr_t buffer_addr,
+					    void *buffer_addr,
 					    size_t buffer_size)
 {
 	return fsalstat(ERR_FSAL_NOTSUPP, 0);
@@ -2780,6 +2861,8 @@ static void handle_to_key(struct fsal_obj_handle *obj_hdl,
 
 void handle_ops_init(struct fsal_obj_ops *ops)
 {
+	fsal_default_obj_ops_init(ops);
+
 	ops->release = handle_release;
 	ops->merge = glusterfs_merge;
 	ops->lookup = lookup;
@@ -2805,6 +2888,7 @@ void handle_ops_init(struct fsal_obj_ops *ops)
 	ops->lock_op2 = glusterfs_lock_op2;
 	ops->setattr2 = glusterfs_setattr2;
 	ops->close2 = glusterfs_close2;
+	ops->seek2 = seek2;
 
 
 	/* pNFS related ops */

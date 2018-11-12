@@ -148,7 +148,7 @@ static state_status_t lock_grant(const struct fsal_up_vector *vec,
 		return STATE_NOT_FOUND;
 
 	grant_blocked_lock_upcall(obj, owner, lock_param);
-	obj->obj_ops.put_ref(obj);
+	obj->obj_ops->put_ref(obj);
 	return STATE_SUCCESS;
 }
 
@@ -176,7 +176,7 @@ static state_status_t lock_avail(const struct fsal_up_vector *vec,
 		return STATE_NOT_FOUND;
 
 	available_blocked_lock_upcall(obj, owner, lock_param);
-	obj->obj_ops.put_ref(obj);
+	obj->obj_ops->put_ref(obj);
 	return STATE_SUCCESS;
 }
 
@@ -488,7 +488,7 @@ state_status_t layoutrecall(const struct fsal_up_vector *vec,
 
 	/* Free the recall list resources */
 	destroy_recall(recall);
-	obj->obj_ops.put_ref(obj);
+	obj->obj_ops->put_ref(obj);
 
 	return rc;
 }
@@ -657,7 +657,7 @@ out:
 		put_gsh_export(export);
 
 		/* Release object ref */
-		obj->obj_ops.put_ref(obj);
+		obj->obj_ops->put_ref(obj);
 
 		/* Release the owner */
 		dec_state_owner_ref(owner);
@@ -723,7 +723,7 @@ static void return_one_async(void *arg)
 		put_gsh_export(export);
 
 		/* Release object ref */
-		obj->obj_ops.put_ref(obj);
+		obj->obj_ops->put_ref(obj);
 
 		/* Release the owner */
 		dec_state_owner_ref(owner);
@@ -836,7 +836,7 @@ static void layoutrecall_one_call(void *arg)
 		put_gsh_export(export);
 
 		/* Release object ref */
-		obj->obj_ops.put_ref(obj);
+		obj->obj_ops->put_ref(obj);
 
 		/* Release the owner */
 		dec_state_owner_ref(owner);
@@ -1118,6 +1118,8 @@ static void delegrecall_completion_func(rpc_call_t *call)
 		goto out_free_drc;
 	}
 
+	op_ctx = &req_ctx;
+
 	ret = get_state_obj_export_owner_refs(state, &obj,
 					     &export,
 					     NULL);
@@ -1127,7 +1129,6 @@ static void delegrecall_completion_func(rpc_call_t *call)
 		goto out_free_drc;
 	}
 
-	op_ctx = &req_ctx;
 	op_ctx->ctx_export = export;
 	op_ctx->fsal_export = export->fsal_export;
 
@@ -1219,7 +1220,7 @@ out_free:
 
 	/* Release the obj ref and export ref. */
 	if (obj != NULL)
-		obj->obj_ops.put_ref(obj);
+		obj->obj_ops->put_ref(obj);
 
 	if (export != NULL)
 		put_gsh_export(export);
@@ -1347,6 +1348,9 @@ static void delegrevoke_check(void *ctx)
 		str_valid = true;
 	}
 
+	/* op_ctx may be used by state_del_locked and others */
+	op_ctx = &req_ctx;
+
 	ret = get_state_obj_export_owner_refs(state, &obj,
 					     &export,
 					     NULL);
@@ -1356,8 +1360,6 @@ static void delegrevoke_check(void *ctx)
 		goto out;
 	}
 
-	/* op_ctx may be used by state_del_locked and others */
-	op_ctx = &req_ctx;
 	op_ctx->ctx_export = export;
 	op_ctx->fsal_export = export->fsal_export;
 
@@ -1401,7 +1403,7 @@ static void delegrevoke_check(void *ctx)
 
 	/* Release the obj ref and export ref. */
 	if (obj != NULL)
-		obj->obj_ops.put_ref(obj);
+		obj->obj_ops->put_ref(obj);
 
 	if (export != NULL)
 		put_gsh_export(export);
@@ -1423,33 +1425,35 @@ static void delegrecall_task(void *ctx)
 	if (state == NULL) {
 		LogDebug(COMPONENT_NFS_CB, "Delgation is already returned");
 		free_delegrecall_context(deleg_ctx);
-	} else {
-		ret = get_state_obj_export_owner_refs(state, &obj,
-						     &export,
-						     NULL);
-
-		if (!ret || obj == NULL) {
-			LogDebug(COMPONENT_NFS_CB,
-				 "Delgation recall skipped due to stale file");
-			goto out;
-		}
-
-		/* op_ctx may be used by state_del_locked and others */
-		save_ctx = op_ctx;
-		op_ctx = &req_ctx;
-		op_ctx->ctx_export = export;
-		op_ctx->fsal_export = export->fsal_export;
-		delegrecall_one(obj, state, deleg_ctx);
-
-		/* Release the obj ref and export ref. */
-		obj->obj_ops.put_ref(obj);
-		put_gsh_export(export);
-
-		op_ctx = save_ctx;
-
-out:
-		dec_state_t_ref(state);
+		return;
 	}
+
+	/* op_ctx may be used by state_del_locked and others */
+	save_ctx = op_ctx;
+	op_ctx = &req_ctx;
+
+	ret = get_state_obj_export_owner_refs(state, &obj,
+					     &export,
+					     NULL);
+	if (!ret || obj == NULL) {
+		LogDebug(COMPONENT_NFS_CB,
+			 "Delgation recall skipped due to stale file");
+		goto out;
+	}
+
+	op_ctx->ctx_export = export;
+	op_ctx->fsal_export = export->fsal_export;
+
+	delegrecall_one(obj, state, deleg_ctx);
+
+	/* Release the obj ref and export ref. */
+	obj->obj_ops->put_ref(obj);
+	put_gsh_export(export);
+	op_ctx->ctx_export = NULL;
+	op_ctx->fsal_export = NULL;
+out:
+	dec_state_t_ref(state);
+	op_ctx = save_ctx;
 }
 
 static int schedule_delegrecall_task(struct delegrecall_context *ctx,
@@ -1603,7 +1607,7 @@ state_status_t delegrecall(const struct fsal_up_vector *vec,
 	}
 
 	rc = delegrecall_impl(obj);
-	obj->obj_ops.put_ref(obj);
+	obj->obj_ops->put_ref(obj);
 	return rc;
 }
 

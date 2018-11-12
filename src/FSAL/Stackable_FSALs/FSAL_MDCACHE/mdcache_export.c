@@ -1,7 +1,7 @@
 /*
  * vim:noexpandtab:shiftwidth=8:tabstop=8:
  *
- * Copyright 2015-2017 Red Hat, Inc. and/or its affiliates.
+ * Copyright 2015-2018 Red Hat, Inc. and/or its affiliates.
  * Author: Daniel Gryniewicz <dang@redhat.com>
  *
  * This program is free software; you can redistribute it and/or
@@ -57,7 +57,6 @@
  * helpers to/from other NULL objects
  */
 
-struct fsal_staticfsinfo_t *mdcache_staticinfo(struct fsal_module *hdl);
 
 /*
  * export object methods
@@ -116,8 +115,10 @@ static void mdcache_unexport(struct fsal_export *exp_hdl,
 		}
 
 		entry = expmap->entry;
-		/* Get a ref across cleanup */
-		status = mdcache_get(entry);
+		/* Get a ref across cleanup.  This must be an initial ref, so
+		 * that it takes the LRU lane lock, keeping it from racing with
+		 * lru_lane_run() */
+		status = mdcache_lru_ref(entry, LRU_REQ_INITIAL);
 		PTHREAD_RWLOCK_unlock(&exp->mdc_exp_lock);
 
 		if (FSAL_IS_ERROR(status)) {
@@ -135,6 +136,12 @@ static void mdcache_unexport(struct fsal_export *exp_hdl,
 					   struct entry_export_map,
 					   export_per_entry);
 		if (expmap == NULL) {
+			/* Entry is unmapped, clear first_export_id.  This is to
+			 * close a race caused by lru_run_lane() taking a ref
+			 * before we call mdcache_lru_cleanup_try_push() below.
+			 * */
+			atomic_store_int32_t(&entry->first_export_id, -1);
+
 			/* We must not hold entry->attr_lock across
 			 * try_cleanup_push (LRU lane lock order) */
 			PTHREAD_RWLOCK_unlock(&exp->mdc_exp_lock);
@@ -385,27 +392,6 @@ static uint32_t mdcache_fs_maxpathlen(struct fsal_export *exp_hdl)
 }
 
 /**
- * @brief Get the FS lease time
- *
- * MDCACHE only caches metadata, so it imposes no restrictions itself.
- *
- * @param[in] exp_hdl	Export to query
- * @return Lease time
- */
-static struct timespec mdcache_fs_lease_time(struct fsal_export *exp_hdl)
-{
-	struct mdcache_fsal_export *exp = mdc_export(exp_hdl);
-	struct fsal_export *sub_export = exp->mfe_exp.sub_export;
-	struct timespec result;
-
-	subcall_raw(exp,
-		result = sub_export->exp_ops.fs_lease_time(sub_export)
-	       );
-
-	return result;
-}
-
-/**
  * @brief Get the NFSv4 ACLSUPPORT attribute
  *
  * MDCACHE does not provide or restrict ACLs
@@ -463,27 +449,6 @@ static uint32_t mdcache_fs_umask(struct fsal_export *exp_hdl)
 
 	subcall_raw(exp,
 		result = sub_export->exp_ops.fs_umask(sub_export)
-	       );
-
-	return result;
-}
-
-/**
- * @brief Get the configured xattr access mask
- *
- * MDCACHE only caches metadata, so it imposes no restrictions itself.
- *
- * @param[in] exp_hdl	Export to query
- * @return POSIX access bits for xattrs
- */
-static uint32_t mdcache_fs_xattr_access_rights(struct fsal_export *exp_hdl)
-{
-	struct mdcache_fsal_export *exp = mdc_export(exp_hdl);
-	struct fsal_export *sub_export = exp->mfe_exp.sub_export;
-	uint32_t result;
-
-	subcall_raw(exp,
-		result = sub_export->exp_ops.fs_xattr_access_rights(sub_export)
 	       );
 
 	return result;
@@ -824,6 +789,22 @@ static bool mdcache_is_superuser(struct fsal_export *exp_hdl,
 	return status;
 }
 
+/**
+ * @brief Prepare an export to be unexported
+ *
+ * @param[in] exp_hdl               Export state_t is associated with
+ *
+ * @returns NULL on failure otherwise a state structure.
+ */
+
+static void mdcache_prepare_unexport(struct fsal_export *exp_hdl)
+{
+	struct mdcache_fsal_export *exp = mdc_export(exp_hdl);
+	struct fsal_export *sub_export = exp->mfe_exp.sub_export;
+
+	subcall_raw(exp, sub_export->exp_ops.prepare_unexport(sub_export));
+}
+
 /* mdcache_export_ops_init
  * overwrite vector entries with the methods that we support
  */
@@ -831,6 +812,7 @@ static bool mdcache_is_superuser(struct fsal_export *exp_hdl,
 void mdcache_export_ops_init(struct export_ops *ops)
 {
 	ops->get_name = mdcache_get_name;
+	ops->prepare_unexport = mdcache_prepare_unexport;
 	ops->unexport = mdcache_unexport;
 	ops->release = mdcache_exp_release;
 	ops->lookup_path = mdcache_lookup_path;
@@ -846,11 +828,9 @@ void mdcache_export_ops_init(struct export_ops *ops)
 	ops->fs_maxlink = mdcache_fs_maxlink;
 	ops->fs_maxnamelen = mdcache_fs_maxnamelen;
 	ops->fs_maxpathlen = mdcache_fs_maxpathlen;
-	ops->fs_lease_time = mdcache_fs_lease_time;
 	ops->fs_acl_support = mdcache_fs_acl_support;
 	ops->fs_supported_attrs = mdcache_fs_supported_attrs;
 	ops->fs_umask = mdcache_fs_umask;
-	ops->fs_xattr_access_rights = mdcache_fs_xattr_access_rights;
 	ops->check_quota = mdcache_check_quota;
 	ops->get_quota = mdcache_get_quota;
 	ops->set_quota = mdcache_set_quota;

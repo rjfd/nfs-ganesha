@@ -58,7 +58,6 @@
 /* helpers to/from other PSEUDO objects
  */
 
-struct fsal_staticfsinfo_t *pseudofs_staticinfo(struct fsal_module *hdl);
 
 /* export object methods
  */
@@ -106,103 +105,6 @@ static fsal_status_t get_dynamic_info(struct fsal_export *exp_hdl,
 	infop->time_delta.tv_nsec = 0;
 
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
-}
-
-static bool fs_supports(struct fsal_export *exp_hdl,
-			fsal_fsinfo_options_t option)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_supports(info, option);
-}
-
-static uint64_t fs_maxfilesize(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_maxfilesize(info);
-}
-
-static uint32_t fs_maxread(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_maxread(info);
-}
-
-static uint32_t fs_maxwrite(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_maxwrite(info);
-}
-
-static uint32_t fs_maxlink(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_maxlink(info);
-}
-
-static uint32_t fs_maxnamelen(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_maxnamelen(info);
-}
-
-static uint32_t fs_maxpathlen(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_maxpathlen(info);
-}
-
-static struct timespec fs_lease_time(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_lease_time(info);
-}
-
-static fsal_aclsupp_t fs_acl_support(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_acl_support(info);
-}
-
-static attrmask_t fs_supported_attrs(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_supported_attrs(info);
-}
-
-static uint32_t fs_umask(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_umask(info);
-}
-
-static uint32_t fs_xattr_access_rights(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = pseudofs_staticinfo(exp_hdl->fsal);
-	return fsal_xattr_access_rights(info);
 }
 
 /* get_quota
@@ -286,18 +188,6 @@ void pseudofs_export_ops_init(struct export_ops *ops)
 	ops->wire_to_host = wire_to_host;
 	ops->create_handle = pseudofs_create_handle;
 	ops->get_fs_dynamic_info = get_dynamic_info;
-	ops->fs_supports = fs_supports;
-	ops->fs_maxfilesize = fs_maxfilesize;
-	ops->fs_maxread = fs_maxread;
-	ops->fs_maxwrite = fs_maxwrite;
-	ops->fs_maxlink = fs_maxlink;
-	ops->fs_maxnamelen = fs_maxnamelen;
-	ops->fs_maxpathlen = fs_maxpathlen;
-	ops->fs_lease_time = fs_lease_time;
-	ops->fs_acl_support = fs_acl_support;
-	ops->fs_supported_attrs = fs_supported_attrs;
-	ops->fs_umask = fs_umask;
-	ops->fs_xattr_access_rights = fs_xattr_access_rights;
 	ops->get_quota = get_quota;
 	ops->set_quota = set_quota;
 }

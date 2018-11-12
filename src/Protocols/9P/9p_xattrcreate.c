@@ -38,7 +38,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/xattr.h>
+#include "os/xattr.h"
 #include "nfs_core.h"
 #include "nfs_exports.h"
 #include "log.h"
@@ -110,7 +110,7 @@ int _9p_xattrcreate(struct _9p_request_data *req9p, u32 *plenout, char *preply)
 			 (u32) *msgtag, *fid, name);
 
 		fsal_status =
-		    pfid->pentry->obj_ops.remove_extattr_by_name(pfid->pentry,
+		    pfid->pentry->obj_ops->remove_extattr_by_name(pfid->pentry,
 								 name);
 
 		if (FSAL_IS_ERROR(fsal_status))
@@ -134,7 +134,7 @@ int _9p_xattrcreate(struct _9p_request_data *req9p, u32 *plenout, char *preply)
 		 * settings a xattr named system.posix_acl_access BUT this
 		 * attribute is to be used and should not be created
 		 * (it exists already since acl feature is on) */
-		if (!strncmp(name, "system.posix_acl_access", MAXNAMLEN))
+		if (!strcmp(name, "system.posix_acl_access"))
 			goto skip_create;
 
 		/* try to create if flag doesn't have REPLACE bit */
@@ -144,7 +144,7 @@ int _9p_xattrcreate(struct _9p_request_data *req9p, u32 *plenout, char *preply)
 			create = false;
 
 		fsal_status =
-		    pfid->pentry->obj_ops.setextattr_value(pfid->pentry, name,
+		    pfid->pentry->obj_ops->setextattr_value(pfid->pentry, name,
 				pfid->xattr->xattr_content,
 				*size, create);
 
@@ -152,15 +152,15 @@ int _9p_xattrcreate(struct _9p_request_data *req9p, u32 *plenout, char *preply)
 		 * and create failed because attribute already exists */
 		if (FSAL_IS_ERROR(fsal_status)
 		    && fsal_status.major == ERR_FSAL_EXIST && (*flag == 0)) {
-			fsal_status =
-			    pfid->pentry->obj_ops.setextattr_value(pfid->pentry,
-					     name,
-					     pfid->xattr->xattr_content,
-					     *size, false);
+			fsal_status = pfid->pentry->obj_ops->setextattr_value(
+						pfid->pentry, name,
+						pfid->xattr->xattr_content,
+						*size, false);
 		}
 
 		if (FSAL_IS_ERROR(fsal_status)) {
 			gsh_free(pfid->xattr);
+			pfid->xattr = NULL;
 			return _9p_rerror(req9p, msgtag,
 					  _9p_tools_errno(fsal_status), plenout,
 					  preply);

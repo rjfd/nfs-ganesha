@@ -153,8 +153,8 @@ int _9p_attach(struct _9p_request_data *req9p, u32 *plenout, char *preply)
 	pfid = gsh_calloc(1, sizeof(struct _9p_fid));
 
 	/* Copy the export into the pfid with reference. */
-	pfid->export = op_ctx->ctx_export;
-	get_gsh_export_ref(pfid->export);
+	pfid->fid_export = op_ctx->ctx_export;
+	get_gsh_export_ref(pfid->fid_export);
 
 	pfid->fid = *fid;
 	req9p->pconn->fids[*fid] = pfid;
@@ -204,7 +204,7 @@ int _9p_attach(struct _9p_request_data *req9p, u32 *plenout, char *preply)
 			goto errout;
 		}
 
-		pfsal_handle->obj_ops.handle_to_key(pfsal_handle,
+		pfsal_handle->obj_ops->handle_to_key(pfsal_handle,
 						 &fh_desc);
 		fsal_status = op_ctx->fsal_export->exp_ops.create_handle(
 				 op_ctx->fsal_export, &fh_desc, &pfid->pentry,

@@ -1040,6 +1040,7 @@ hashtable_getref(hash_table_t *ht, struct gsh_buffdesc *key,
 	case HASHTABLE_SUCCESS:
 		if (get_ref != NULL)
 			get_ref(val);
+		/* FALLTHROUGH */
 	case HASHTABLE_ERROR_NO_SUCH_KEY:
 		hashtable_releaselatched(ht, &latch);
 		break;
@@ -1051,4 +1052,21 @@ hashtable_getref(hash_table_t *ht, struct gsh_buffdesc *key,
 	return rc;
 }
 
+void hashtable_for_each(hash_table_t *ht, ht_for_each_cb_t callback, void *arg)
+{
+	uint32_t i;
+	struct rbt_head *head_rbt;
+	struct rbt_node *pn;
+
+	/* For each bucket of the requested hashtable */
+	for (i = 0; i < ht->parameter.index_size; i++) {
+		head_rbt = &ht->partitions[i].rbt;
+		PTHREAD_RWLOCK_rdlock(&ht->partitions[i].lock);
+		RBT_LOOP(head_rbt, pn) {
+			callback(pn, arg);
+			RBT_INCREMENT(pn);
+		}
+		PTHREAD_RWLOCK_unlock(&ht->partitions[i].lock);
+	}
+}
 /** @} */

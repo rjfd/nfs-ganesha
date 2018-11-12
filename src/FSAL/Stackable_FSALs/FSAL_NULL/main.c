@@ -41,57 +41,42 @@
 #include "FSAL/fsal_init.h"
 #include "nullfs_methods.h"
 
-/* NULLFS FSAL module private storage
- */
-
-struct nullfs_fsal_module {
-	struct fsal_module fsal;
-	struct fsal_staticfsinfo_t fs_info;
-	/* nullfsfs_specific_initinfo_t specific_info;  placeholder */
-};
 
 /* FSAL name determines name of shared library: libfsal<name>.so */
 const char myname[] = "NULL";
 
-/* filesystem info for NULLFS */
-static struct fsal_staticfsinfo_t default_posix_info = {
-	.maxfilesize = UINT64_MAX,
-	.maxlink = _POSIX_LINK_MAX,
-	.maxnamelen = 1024,
-	.maxpathlen = 1024,
-	.no_trunc = true,
-	.chown_restricted = true,
-	.case_insensitive = false,
-	.case_preserving = true,
-	.link_support = true,
-	.symlink_support = true,
-	.lock_support = true,
-	.lock_support_async_block = false,
-	.named_attr = true,
-	.unique_handles = true,
-	.lease_time = {10, 0},
-	.acl_support = FSAL_ACLSUPPORT_ALLOW,
-	.cansettime = true,
-	.homogenous = true,
-	.supported_attrs = ALL_ATTRIBUTES,
-	.maxread = FSAL_MAXIOSIZE,
-	.maxwrite = FSAL_MAXIOSIZE,
-	.umask = 0,
-	.auth_exportpath_xdev = false,
-	.xattr_access_rights = 0400,	/* root=RW, owner=R */
-	.link_supports_permission_checks = true,
-};
-
-/* private helper for export object
+/* my module private storage
  */
 
-struct fsal_staticfsinfo_t *nullfs_staticinfo(struct fsal_module *hdl)
-{
-	struct nullfs_fsal_module *myself;
-
-	myself = container_of(hdl, struct nullfs_fsal_module, fsal);
-	return &myself->fs_info;
-}
+struct null_fsal_module NULLFS = {
+	.module = {
+		.fs_info = {
+			.maxfilesize = UINT64_MAX,
+			.maxlink = _POSIX_LINK_MAX,
+			.maxnamelen = 1024,
+			.maxpathlen = 1024,
+			.no_trunc = true,
+			.chown_restricted = true,
+			.case_insensitive = false,
+			.case_preserving = true,
+			.link_support = true,
+			.symlink_support = true,
+			.lock_support = true,
+			.lock_support_async_block = false,
+			.named_attr = true,
+			.unique_handles = true,
+			.acl_support = FSAL_ACLSUPPORT_ALLOW,
+			.cansettime = true,
+			.homogenous = true,
+			.supported_attrs = ALL_ATTRIBUTES,
+			.maxread = FSAL_MAXIOSIZE,
+			.maxwrite = FSAL_MAXIOSIZE,
+			.umask = 0,
+			.auth_exportpath_xdev = false,
+			.link_supports_permission_checks = true,
+		}
+	}
+};
 
 /* Module methods
  */
@@ -100,16 +85,10 @@ struct fsal_staticfsinfo_t *nullfs_staticinfo(struct fsal_module *hdl)
  * must be called with a reference taken (via lookup_fsal)
  */
 
-static fsal_status_t init_config(struct fsal_module *fsal_hdl,
+static fsal_status_t init_config(struct fsal_module *nullfs_fsal_module,
 				 config_file_t config_struct,
 				 struct config_error_type *err_type)
 {
-	struct nullfs_fsal_module *nullfs_me =
-	    container_of(fsal_hdl, struct nullfs_fsal_module, fsal);
-
-	/* get a copy of the defaults */
-	nullfs_me->fs_info = default_posix_info;
-
 	/* Configuration setting options:
 	 * 1. there are none that are changeable. (this case)
 	 *
@@ -122,13 +101,10 @@ static fsal_status_t init_config(struct fsal_module *fsal_hdl,
 	 * diverse exports.
 	 */
 
-	display_fsinfo(&nullfs_me->fs_info);
-	LogFullDebug(COMPONENT_FSAL,
-		     "Supported attributes default = 0x%" PRIx64,
-		     default_posix_info.supported_attrs);
+	display_fsinfo(nullfs_fsal_module);
 	LogDebug(COMPONENT_FSAL,
 		 "FSAL INIT: Supported attributes mask = 0x%" PRIx64,
-		 nullfs_me->fs_info.supported_attrs);
+		 nullfs_fsal_module->fs_info.supported_attrs);
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
@@ -145,18 +121,12 @@ fsal_status_t nullfs_create_export(struct fsal_module *fsal_hdl,
  * keep a private pointer to me in myself
  */
 
-/* my module private storage
- */
-
-static struct nullfs_fsal_module NULLFS;
-struct next_ops next_ops;
-
 /* linkage to the exports and handle ops initializers
  */
 MODULE_INIT void nullfs_init(void)
 {
 	int retval;
-	struct fsal_module *myself = &NULLFS.fsal;
+	struct fsal_module *myself = &NULLFS.module;
 
 	retval = register_fsal(myself, myname, FSAL_MAJOR_VERSION,
 			       FSAL_MINOR_VERSION, FSAL_ID_NO_PNFS);
@@ -166,13 +136,16 @@ MODULE_INIT void nullfs_init(void)
 	}
 	myself->m_ops.create_export = nullfs_create_export;
 	myself->m_ops.init_config = init_config;
+
+	/* Initialize the fsal_obj_handle ops for FSAL NULL */
+	nullfs_handle_ops_init(&NULLFS.handle_ops);
 }
 
 MODULE_FINI void nullfs_unload(void)
 {
 	int retval;
 
-	retval = unregister_fsal(&NULLFS.fsal);
+	retval = unregister_fsal(&NULLFS.module);
 	if (retval != 0) {
 		fprintf(stderr, "NULLFS module failed to unregister");
 		return;

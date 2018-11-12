@@ -98,7 +98,6 @@ bool state_unlock_err_ok(state_status_t status);
  * @param[in,out] ostate	State handle to initialize
  * @param[in] type	Type of handle
  * @param[in] obj	Object owning handle
- * @return Return description
  */
 static inline void state_hdl_init(struct state_hdl *ostate,
 				  object_file_type_t type,
@@ -120,6 +119,16 @@ static inline void state_hdl_init(struct state_hdl *ostate,
 	default:
 		break;
 	}
+}
+
+/**
+ * @brief Clean up a state handle
+ *
+ * @param[in] state_hdl	State handle to clean up
+ */
+static inline void state_hdl_cleanup(struct state_hdl *state_hdl)
+{
+	PTHREAD_RWLOCK_destroy(&state_hdl->state_lock);
 }
 
 /*****************************************************************************
@@ -352,8 +361,10 @@ nfs_client_record_t *get_client_record(const char *const value,
 int display_session_id(struct display_buffer *dspbuf, char *session_id);
 int display_session(struct display_buffer *dspbuf, nfs41_session_t *session);
 
-int32_t inc_session_ref(nfs41_session_t *session);
-int32_t dec_session_ref(nfs41_session_t *session);
+int32_t _inc_session_ref(nfs41_session_t *session, const char *func, int line);
+#define inc_session_ref(s)  _inc_session_ref(s, __func__, __LINE__)
+int32_t _dec_session_ref(nfs41_session_t *session, const char *func, int line);
+#define dec_session_ref(s)  _dec_session_ref(s, __func__, __LINE__)
 
 int display_session_id_key(struct gsh_buffdesc *buff, char *str);
 int display_session_id_val(struct gsh_buffdesc *buff, char *str);
@@ -375,6 +386,10 @@ int nfs41_Session_Get_Pointer(char sessionid[NFS4_SESSIONID_SIZE],
 int nfs41_Session_Del(char sessionid[NFS4_SESSIONID_SIZE]);
 void nfs41_Build_sessionid(clientid4 *clientid, char *sessionid);
 void nfs41_Session_PrintAll(void);
+
+bool check_session_conn(nfs41_session_t *session,
+			compound_data_t *data,
+			bool can_associate);
 
 /******************************************************************************
  *
@@ -539,12 +554,10 @@ state_owner_t *create_nfs4_owner(state_nfs4_owner_name_t *name,
 
 int Init_nfs4_owner(void);
 
-void Process_nfs4_conflict(/* NFS v4 Lock4denied structure to fill in */
-			   LOCK4denied * denied,
-			   /* owner that holds conflicting lock */
-			   state_owner_t *holder,
-			   /* description of conflicting lock */
-			   fsal_lock_param_t *conflict);
+nfsstat4 Process_nfs4_conflict(LOCK4denied *denied,
+			       state_owner_t *holder,
+			       fsal_lock_param_t *conflict,
+			       compound_data_t *data);
 
 void Release_nfs4_denied(LOCK4denied *denied);
 void Copy_nfs4_denied(LOCK4denied *denied_dst, LOCK4denied *denied_src);
@@ -726,7 +739,7 @@ void state_del(state_t *state);
 static inline struct fsal_obj_handle *get_state_obj_ref_locked(state_t *state)
 {
 	if (state->state_obj) {
-		state->state_obj->obj_ops.get_ref(state->state_obj);
+		state->state_obj->obj_ops->get_ref(state->state_obj);
 	}
 
 	return state->state_obj;
@@ -887,8 +900,7 @@ void deleg_heuristics_recall(struct fsal_obj_handle *obj,
 			     struct state_t *deleg);
 void get_deleg_perm(nfsace4 *permissions, open_delegation_type4 type);
 void update_delegation_stats(struct state_hdl *ostate,
-			     state_owner_t *owner,
-			     struct state_t *deleg);
+			     state_owner_t *owner);
 state_status_t delegrecall_impl(struct fsal_obj_handle *obj);
 nfsstat4 deleg_revoke(struct fsal_obj_handle *obj, struct state_t *deleg_state);
 void state_deleg_revoke(struct fsal_obj_handle *obj, state_t *state);
@@ -969,17 +981,29 @@ void blocked_lock_polling(struct fridgethr_context *ctx);
  *
  ******************************************************************************/
 
+/* Grace period handling */
+extern int32_t reclaim_completes; /* atomic */
 void nfs_start_grace(nfs_grace_start_t *gsp);
+void nfs_end_grace(void);
 bool nfs_in_grace(void);
+void nfs_maybe_start_grace(void);
+bool nfs_grace_is_member(void);
 void nfs_try_lift_grace(void);
+void nfs_wait_for_grace_enforcement(void);
+void nfs_notify_grace_waiters(void);
+
+/* v4 Client stable-storage database management */
 void nfs4_add_clid(nfs_client_id_t *);
 void nfs4_rm_clid(nfs_client_id_t *);
-void nfs4_recovery_reclaim_complete(nfs_client_id_t *clientid);
 void nfs4_chk_clid(nfs_client_id_t *);
-void nfs4_recovery_cleanup(void);
-void nfs4_recovery_init(void);
-void nfs4_record_revoke(nfs_client_id_t *, nfs_fh4 *);
+
+/* Delegation revocation tracking */
 bool nfs4_check_deleg_reclaim(nfs_client_id_t *, nfs_fh4 *);
+void nfs4_record_revoke(nfs_client_id_t *, nfs_fh4 *);
+
+/* Recovery backend management */
+int nfs4_recovery_init(void);
+void nfs4_recovery_shutdown(void);
 
 /**
  * @brief Check to see if an object is a junction
@@ -1008,14 +1032,20 @@ typedef clid_entry_t * (*add_clid_entry_hook)(char *);
 typedef rdel_fh_t * (*add_rfh_entry_hook)(clid_entry_t *, char *);
 
 struct nfs4_recovery_backend {
-	void (*recovery_init)(void);
-	void (*recovery_cleanup)(void);
+	int (*recovery_init)(void);
+	void (*recovery_shutdown)(void);
 	void (*recovery_read_clids)(nfs_grace_start_t *gsp,
 				    add_clid_entry_hook add_clid,
 				    add_rfh_entry_hook add_rfh);
 	void (*add_clid)(nfs_client_id_t *);
 	void (*rm_clid)(nfs_client_id_t *);
 	void (*add_revoke_fh)(nfs_client_id_t *, nfs_fh4 *);
+	void (*end_grace)(void);
+	void (*maybe_start_grace)(void);
+	bool (*try_lift_grace)(void);
+	void (*set_enforcing)(void);
+	bool (*grace_enforcing)(void);
+	bool (*is_member)(void);
 };
 
 void fs_backend_init(struct nfs4_recovery_backend **);
@@ -1024,6 +1054,7 @@ void fs_ng_backend_init(struct nfs4_recovery_backend **);
 int rados_kv_set_param_from_conf(config_file_t, struct config_error_type *);
 void rados_kv_backend_init(struct nfs4_recovery_backend **);
 void rados_ng_backend_init(struct nfs4_recovery_backend **);
+void rados_cluster_backend_init(struct nfs4_recovery_backend **backend);
 #endif
 
 #endif				/* SAL_FUNCTIONS_H */

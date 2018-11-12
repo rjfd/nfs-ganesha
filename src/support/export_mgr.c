@@ -65,6 +65,8 @@
 #include "nfs_proto_functions.h"
 #include "pnfs_utils.h"
 
+struct timespec nfs_stats_time;
+struct timespec fsal_stats_time;
 /**
  * @brief Exports are stored in an AVL tree with front-end cache.
  *
@@ -1214,6 +1216,89 @@ static struct gsh_dbus_method export_remove_export = {
 	.name = "tag",		\
 	.type = "s",		\
 	.direction = "out"	\
+},				\
+{				\
+	.name = "clients",	\
+	.type = "a(siyyiuuuuu)",\
+	.direction = "out",	\
+}
+
+static void client_of_export(exportlist_client_entry_t *client, void *state)
+{
+	struct showexports_state *client_array_iter =
+		(struct showexports_state *)state;
+	DBusMessageIter client_struct_iter;
+	const char *grp_name;
+
+	switch (client->type) {
+	case NETWORK_CLIENT:
+		grp_name = cidr_to_str(client->client.network.cidr,
+				CIDR_NOFLAGS);
+		if (grp_name == NULL) {
+			grp_name = "Invalid Network Address";
+		}
+		break;
+	case NETGROUP_CLIENT:
+		grp_name = client->client.netgroup.netgroupname;
+		break;
+	case GSSPRINCIPAL_CLIENT:
+		grp_name = client->client.gssprinc.princname;
+		break;
+	case MATCH_ANY_CLIENT:
+		grp_name = "*";
+		break;
+	case WILDCARDHOST_CLIENT:
+		grp_name = client->client.wildcard.wildcard;
+		break;
+	default:
+		grp_name = "<unknown>";
+	}
+	dbus_message_iter_open_container(&client_array_iter->export_iter,
+					 DBUS_TYPE_STRUCT, NULL,
+					 &client_struct_iter);
+	// Client type
+	dbus_message_iter_append_basic(&client_struct_iter, DBUS_TYPE_STRING,
+				       &grp_name);
+	// Client Cidr block
+	if (client->type == NETWORK_CLIENT) {
+		dbus_message_iter_append_basic(&client_struct_iter,
+					DBUS_TYPE_INT32,
+					&client->client.network.cidr->version);
+		dbus_message_iter_append_basic(&client_struct_iter,
+					DBUS_TYPE_BYTE,
+					&client->client.network.cidr->addr);
+		dbus_message_iter_append_basic(&client_struct_iter,
+					DBUS_TYPE_BYTE,
+					&client->client.network.cidr->mask);
+		dbus_message_iter_append_basic(&client_struct_iter,
+					DBUS_TYPE_INT32,
+					&client->client.network.cidr->proto);
+	} else {
+		int dummy_val1 = 0;
+		uint8_t dummy_val2 = 0;
+
+		dbus_message_iter_append_basic(&client_struct_iter,
+					       DBUS_TYPE_INT32, &dummy_val1);
+		dbus_message_iter_append_basic(&client_struct_iter,
+					       DBUS_TYPE_BYTE, &dummy_val2);
+		dbus_message_iter_append_basic(&client_struct_iter,
+					       DBUS_TYPE_BYTE, &dummy_val2);
+		dbus_message_iter_append_basic(&client_struct_iter,
+					       DBUS_TYPE_INT32, &dummy_val1);
+	}
+	// Client Export Permissions
+	dbus_message_iter_append_basic(&client_struct_iter, DBUS_TYPE_UINT32,
+				       &client->client_perms.anonymous_uid);
+	dbus_message_iter_append_basic(&client_struct_iter, DBUS_TYPE_UINT32,
+				       &client->client_perms.anonymous_gid);
+	dbus_message_iter_append_basic(&client_struct_iter, DBUS_TYPE_UINT32,
+				       &client->client_perms.expire_time_attr);
+	dbus_message_iter_append_basic(&client_struct_iter, DBUS_TYPE_UINT32,
+				       &client->client_perms.options);
+	dbus_message_iter_append_basic(&client_struct_iter, DBUS_TYPE_UINT32,
+				       &client->client_perms.set);
+	dbus_message_iter_close_container(&client_array_iter->export_iter,
+					  &client_struct_iter);
 }
 
 /**
@@ -1233,6 +1318,8 @@ static bool gsh_export_displayexport(DBusMessageIter *args,
 	char *errormsg;
 	bool rc = true;
 	char *path;
+	struct showexports_state client_array_iter;
+	struct glist_head *glist;
 
 	export = lookup_export(args, &errormsg);
 	if (export == NULL) {
@@ -1262,6 +1349,20 @@ static bool gsh_export_displayexport(DBusMessageIter *args,
 	dbus_message_iter_append_basic(&iter,
 				       DBUS_TYPE_STRING,
 				       &path);
+	dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY,
+					 "(siyyiuuuuu)",
+					 &client_array_iter.export_iter);
+	PTHREAD_RWLOCK_rdlock(&export->lock);
+	glist_for_each(glist, &export->clients) {
+		exportlist_client_entry_t *client;
+
+		client = glist_entry(glist, exportlist_client_entry_t,
+				     cle_list);
+		client_of_export(client, (void *)&client_array_iter);
+	}
+	PTHREAD_RWLOCK_unlock(&export->lock);
+	dbus_message_iter_close_container(&iter,
+					  &client_array_iter.export_iter);
 
 	put_gsh_export(export);
 
@@ -1283,7 +1384,7 @@ static bool export_to_dbus(struct gsh_export *exp_node, void *state)
 	    (struct showexports_state *)state;
 	struct export_stats *exp;
 	DBusMessageIter struct_iter;
-	struct timespec last_as_ts = ServerBootTime;
+	struct timespec last_as_ts = nfs_ServerBootTime;
 	const char *path;
 
 	exp = container_of(exp_node, struct export_stats, export);
@@ -1864,12 +1965,15 @@ static bool stats_reset(DBusMessageIter *args,
 	bool success = true;
 	char *errormsg = "OK";
 	DBusMessageIter iter;
+	struct timespec timestamp;
 
 	dbus_message_iter_init_append(reply, &iter);
 	dbus_status_reply(&iter, success, errormsg);
+	now(&timestamp);
+	dbus_append_timestamp(&iter, &timestamp);
 
 	reset_fsal_stats();
-	server_reset_stats(&iter);
+	reset_server_stats();
 
 	return true;
 }
@@ -1879,6 +1983,48 @@ static struct gsh_dbus_method reset_statistics = {
 	.method = stats_reset,
 	.args = {STATUS_REPLY,
 		 TIMESTAMP_REPLY,
+		 END_ARG_LIST}
+};
+
+/**
+ * DBUS method to know current status of stats counting
+ */
+static bool stats_status(DBusMessageIter *args,
+			DBusMessage *reply,
+			DBusError *error)
+{
+	bool success = true;
+	char *errormsg = "OK";
+	DBusMessageIter iter, nfsstatus, fsalstatus;
+	dbus_bool_t value;
+
+	dbus_message_iter_init_append(reply, &iter);
+	dbus_status_reply(&iter, success, errormsg);
+
+	/* Send info about NFS server stats */
+	dbus_message_iter_open_container(&iter, DBUS_TYPE_STRUCT, NULL,
+					 &nfsstatus);
+	value = nfs_param.core_param.enable_NFSSTATS;
+	dbus_message_iter_append_basic(&nfsstatus, DBUS_TYPE_BOOLEAN, &value);
+	dbus_append_timestamp(&nfsstatus, &nfs_stats_time);
+	dbus_message_iter_close_container(&iter, &nfsstatus);
+
+	/* Send info about FSAL stats */
+	dbus_message_iter_open_container(&iter, DBUS_TYPE_STRUCT, NULL,
+					 &fsalstatus);
+	value = nfs_param.core_param.enable_FSALSTATS;
+	dbus_message_iter_append_basic(&fsalstatus, DBUS_TYPE_BOOLEAN, &value);
+	dbus_append_timestamp(&fsalstatus, &fsal_stats_time);
+	dbus_message_iter_close_container(&iter, &fsalstatus);
+
+	return true;
+}
+
+static struct gsh_dbus_method status_stats = {
+	.name = "StatusStats",
+	.method = stats_status,
+	.args = {STATUS_REPLY,
+		 STATS_STATUS_REPLY,
 		 END_ARG_LIST}
 };
 
@@ -1902,11 +2048,28 @@ static bool stats_disable(DBusMessageIter *args,
 	if (strcmp(stat_type, "all") == 0) {
 		nfs_param.core_param.enable_NFSSTATS = false;
 		nfs_param.core_param.enable_FSALSTATS = false;
+		LogEvent(COMPONENT_CONFIG,
+			 "Disabling NFS server statistics counting");
+		LogEvent(COMPONENT_CONFIG,
+			 "Disabling FSAL statistics counting");
+		/* reset all stats counters */
+		reset_fsal_stats();
+		reset_server_stats();
 	}
-	if (strcmp(stat_type, "nfs") == 0)
+	if (strcmp(stat_type, "nfs") == 0) {
 		nfs_param.core_param.enable_NFSSTATS = false;
-	if (strcmp(stat_type, "fsal") == 0)
+		LogEvent(COMPONENT_CONFIG,
+			 "Disabling NFS server statistics counting");
+		/* reset server stats counters */
+		reset_server_stats();
+	}
+	if (strcmp(stat_type, "fsal") == 0) {
 		nfs_param.core_param.enable_FSALSTATS = false;
+		LogEvent(COMPONENT_CONFIG,
+			 "Disabling FSAL statistics counting");
+		/* reset fsal stats counters */
+		reset_fsal_stats();
+	}
 
 	dbus_status_reply(&iter, success, errormsg);
 	now(&timestamp);
@@ -1941,13 +2104,33 @@ static bool stats_enable(DBusMessageIter *args,
 
 	dbus_message_iter_get_basic(args, &stat_type);
 	if (strcmp(stat_type, "all") == 0) {
-		nfs_param.core_param.enable_NFSSTATS = true;
-		nfs_param.core_param.enable_FSALSTATS = true;
+		if (!nfs_param.core_param.enable_NFSSTATS) {
+			nfs_param.core_param.enable_NFSSTATS = true;
+			LogEvent(COMPONENT_CONFIG,
+				 "Enabling NFS server statistics counting");
+			now(&nfs_stats_time);
+		}
+		if (!nfs_param.core_param.enable_FSALSTATS) {
+			nfs_param.core_param.enable_FSALSTATS = true;
+			LogEvent(COMPONENT_CONFIG,
+				 "Enabling FSAL statistics counting");
+			now(&fsal_stats_time);
+		}
 	}
-	if (strcmp(stat_type, "nfs") == 0)
+	if (strcmp(stat_type, "nfs") == 0 &&
+			!nfs_param.core_param.enable_NFSSTATS) {
 		nfs_param.core_param.enable_NFSSTATS = true;
-	if (strcmp(stat_type, "fsal") == 0)
+		LogEvent(COMPONENT_CONFIG,
+			 "Enabling NFS server statistics counting");
+		now(&nfs_stats_time);
+	}
+	if (strcmp(stat_type, "fsal") == 0 &&
+			!nfs_param.core_param.enable_FSALSTATS) {
 		nfs_param.core_param.enable_FSALSTATS = true;
+		LogEvent(COMPONENT_CONFIG,
+			 "Enabling FSAL statistics counting");
+		now(&fsal_stats_time);
+	}
 
 	dbus_status_reply(&iter, success, errormsg);
 	now(&timestamp);
@@ -1999,12 +2182,22 @@ static bool stats_fsal(DBusMessageIter *args,
 		errormsg = "FSAL do not support stats counting";
 		dbus_status_reply(&iter, success, errormsg);
 	} else {
+		if (nfs_param.core_param.enable_FSALSTATS != true) {
+			success = false;
+			errormsg = "FSAL stats disabled";
+			dbus_status_reply(&iter, success, errormsg);
+			return true;
+		}
 		dbus_status_reply(&iter, success, errormsg);
 		fsal_hdl->m_ops.fsal_extract_stats(fsal_hdl, &iter);
 	}
 	return true;
 }
 
+/* Note that just after enabling FSAL stats, we may not have any
+ * stats to return, hence added another message to deal with such
+ * situations.
+ */
 static struct gsh_dbus_method fsal_statistics = {
 	.name = "GetFSALStats",
 	.method = stats_fsal,
@@ -2012,6 +2205,7 @@ static struct gsh_dbus_method fsal_statistics = {
 		 STATUS_REPLY,
 		 TIMESTAMP_REPLY,
 		 FSAL_OPS_REPLY,
+		 MESSAGE_REPLY,
 		 END_ARG_LIST}
 };
 
@@ -2221,6 +2415,7 @@ static struct gsh_dbus_method *export_stats_methods[] = {
 	&fsal_statistics,
 	&enable_statistics,
 	&disable_statistics,
+	&status_stats,
 	NULL
 };
 
@@ -2265,6 +2460,8 @@ void export_pkginit(void)
 	glist_init(&exportlist);
 	glist_init(&mount_work);
 	glist_init(&unexport_work);
+
+	pthread_rwlockattr_destroy(&rwlock_attr);
 }
 
 /** @} */

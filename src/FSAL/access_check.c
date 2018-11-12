@@ -829,7 +829,7 @@ fsal_status_t fsal_test_access(struct fsal_obj_handle *obj_hdl,
 							op_ctx->fsal_export)
 			   & (ATTRS_CREDS | ATTR_MODE | ATTR_ACL));
 
-	status = obj_hdl->obj_ops.getattrs(obj_hdl, &attrs);
+	status = obj_hdl->obj_ops->getattrs(obj_hdl, &attrs);
 
 	if (FSAL_IS_ERROR(status))
 		goto out;
@@ -871,15 +871,23 @@ void fsal_set_credentials(const struct user_cred *creds)
 	setuser(creds->caller_uid);
 }
 
+bool fsal_set_credentials_only_one_user(const struct user_cred *creds)
+{
+	if (creds->caller_uid == ganesha_uid
+		    && creds->caller_gid == ganesha_gid)
+		return true;
+	else
+		return false;
+}
+
 void fsal_save_ganesha_credentials(void)
 {
 	int i;
 	char buffer[1024], *p = buffer;
 
-	ganesha_uid = setuser(0);
-	setuser(ganesha_uid);
-	ganesha_gid = setgroup(0);
-	setgroup(ganesha_gid);
+	ganesha_uid = getuser();
+	ganesha_gid = getgroup();
+
 	ganesha_ngroups = getgroups(0, NULL);
 	if (ganesha_ngroups > 0) {
 		ganesha_groups = gsh_malloc(ganesha_ngroups * sizeof(gid_t));

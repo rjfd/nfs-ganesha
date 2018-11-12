@@ -61,6 +61,9 @@ int mnt_Mnt(nfs_arg_t *arg, struct svc_req *req, nfs_res_t *res)
 	int retval = NFS_REQ_OK;
 	nfs_fh3 *fh3 = (nfs_fh3 *) &res->res_mnt3.mountres3_u.mountinfo.fhandle;
 	struct fsal_obj_handle *obj = NULL;
+	mountres3_ok * const RES_MOUNTINFO =
+	    &res->res_mnt3.mountres3_u.mountinfo;
+
 
 	LogDebug(COMPONENT_NFSPROTO,
 		 "REQUEST PROCESSING: Calling MNT_MNT path=%s", arg->arg_mnt);
@@ -173,7 +176,7 @@ int mnt_Mnt(nfs_arg_t *arg, struct svc_req *req, nfs_res_t *res)
 	/* Release the fsal_obj_handle created for the path */
 	LogFullDebug(COMPONENT_FSAL,
 		     "Releasing %p", obj);
-	obj->obj_ops.put_ref(obj);
+	obj->obj_ops->put_ref(obj);
 
 	/* Return the supported authentication flavor in V3 based
 	 * on the client's export permissions. These should be listed
@@ -203,9 +206,6 @@ int mnt_Mnt(nfs_arg_t *arg, struct svc_req *req, nfs_res_t *res)
 			op_ctx->client
 				? op_ctx->client->hostaddr_str
 				: "unknown client");
-
-	mountres3_ok * const RES_MOUNTINFO =
-	    &res->res_mnt3.mountres3_u.mountinfo;
 
 	RES_MOUNTINFO->auth_flavors.auth_flavors_val =
 		gsh_calloc(index_auth, sizeof(int));

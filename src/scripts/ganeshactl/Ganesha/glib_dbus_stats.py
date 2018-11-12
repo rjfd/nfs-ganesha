@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python2
 
 # You must initialize the gobject/dbus support for threading
 # before doing anything.
@@ -118,6 +118,12 @@ class RetrieveExportStats():
         stats_state = self.exportmgrobj.get_dbus_method("DisableStats",
                                   self.dbus_exportstats_name)
         return StatsDisable(stats_state(stat_type))
+
+    # status
+    def status_stats(self):
+	stats_state = self.exportmgrobj.get_dbus_method("StatusStats",
+				  self.dbus_exportstats_name)
+	return StatsStatus(stats_state())
 
 class RetrieveClientStats():
     def __init__(self):
@@ -386,38 +392,53 @@ class StatsReset():
         else:
             return "Successfully resetted statistics counters"
 
+class StatsStatus():
+    def __init__(self, status):
+	self.status = status
+    def __str__(self):
+	output = ""
+	if not self.status[0]:
+	    return "Unable to fetch current status of stats counting: " + self.status[1]
+	else:
+	    if self.status[2][0]:
+		output += "Stats counting for NFS server is enabled since: \n\t"
+		output += time.ctime(self.status[2][1][0]) + str(self.status[2][1][1]) + " nsecs\n"
+	    else:
+		 output += "Stats counting for NFS server is currently disabled\n"
+	    if self.status[3][0]:
+		output += "Stats counting for FSAL is enabled since: \n\t"
+		output += time.ctime(self.status[3][1][0]) + str(self.status[3][1][1]) + " nsecs"
+	    else:
+		 output += "Stats counting for FSAL is currently disabled"
+	    return output
+
 class DumpFSALStats():
     def __init__(self, stats):
         self.stats = stats
     def __str__(self):
-        output = ""
-        if not self.stats[0]:
-            return ("GANESHA RESPONSE STATUS: " + self.stats[1])
-        else:
-            if self.stats[1] != "OK":
-                output += self.stats[1] + "\n"
-            output += ("Timestamp: " + time.ctime(self.stats[2][0]) + str(self.stats[2][1]) + " nsecs\n")
-            output += "FSAL Stats: \n Total Supported Ops : " +  "%s\n" % (str(self.stats[3][0]).rjust(8))
-            output += "\t Op-Name    Op-Code   Total Res:Avg      Min      Max \n"
-            i = 1
-            tot_len = len(self.stats[3])-1
-            while i < tot_len:
-                output += "\n" + (self.stats[3][i+0]).ljust(20) + "%s" % (str(self.stats[3][i+1]).rjust(4))
-                if (i+2) < tot_len:
-                    if str(self.stats[3][i+2]).isdigit():
-                        if (i+6) < tot_len:
-                            output += "%s" % (str(self.stats[3][i+2]).rjust(8))
-                            output += " %8.2f" % (self.stats[3][i+3])
-                            output += " %s" % (str(self.stats[3][i+4]).rjust(8))
-                            output += " %s" % (str(self.stats[3][i+5]).rjust(8))
-                            i += 6
-                        else:
-                            break
-                    else:
-                        i += 2
-                else:
-                    break
-        return output
+	output = ""
+	if not self.stats[0]:
+	    return ("GANESHA RESPONSE STATUS: " + self.stats[1])
+	else:
+	    output += ("Timestamp: " + time.ctime(self.stats[2][0]) + str(self.stats[2][1]) + " nsecs\n")
+	    if self.stats[3] == "GPFS":
+		output += "FSAL Name - GPFS\n"
+	    	if self.stats[5] != "OK":
+		    output += "No stats available for display"
+		    return output
+	    	else:
+	    	    tot_len = len(self.stats[4])
+	    	    output += "FSAL Stats (response time in milliseconds): \n"
+	    	    output += "\tOp-Name         Total     Res:Avg         Min           Max"
+	    	    i = 0
+	    	    while (i+5) <= tot_len:
+	    	    	output += "\n" + (self.stats[4][i+0]).ljust(20)
+	    	    	output += " %s" % (str(self.stats[4][i+1]).rjust(8))
+	     	    	output += " %12.6f" % (self.stats[4][i+2])
+	    	    	output += " %12.6f" % (self.stats[4][i+3])
+	    	    	output += " %12.6f" % (self.stats[4][i+4])
+	    	    	i += 5
+	    	    return output
 
 class StatsEnable():
     def __init__(self, status):

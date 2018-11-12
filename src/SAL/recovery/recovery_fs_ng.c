@@ -14,8 +14,11 @@
 #include "client_mgr.h"
 #include "fsal.h"
 #include "recovery_fs.h"
+#include <libgen.h>
 
-char v4_recov_link[PATH_MAX];
+static char v4_recov_link[sizeof(NFS_V4_RECOV_ROOT) +
+			  sizeof(NFS_V4_RECOV_DIR) +
+			  NI_MAXHOST + 1];
 
 /*
  * If we have a "legacy" fs driver database, we can allow clients to recover
@@ -35,8 +38,8 @@ static void legacy_fs_db_migrate(void)
 		char *dname;
 
 		/* create empty tmpdir in same parent */
-		snprintf(pathbuf, sizeof(pathbuf), "%s.XXXXXX",
-			 v4_recov_link);
+		snprintf(pathbuf, sizeof(pathbuf), "%s.XXXXXX", v4_recov_link);
+
 		dname = mkdtemp(pathbuf);
 		if (!dname) {
 			LogEvent(COMPONENT_CLIENTID,
@@ -63,22 +66,20 @@ static void legacy_fs_db_migrate(void)
 	}
 }
 
-static void fs_ng_create_recov_dir(void)
+static int fs_ng_create_recov_dir(void)
 {
 	int err;
 	char *newdir;
 	char host[NI_MAXHOST];
 
-	snprintf(recov_root, PATH_MAX, "%s", NFS_V4_RECOV_ROOT);
-
-	err = mkdir(recov_root, 0700);
+	err = mkdir(NFS_V4_RECOV_ROOT, 0700);
 	if (err == -1 && errno != EEXIST) {
 		LogEvent(COMPONENT_CLIENTID,
 			 "Failed to create v4 recovery dir (%s): %s",
-			 recov_root, strerror(errno));
+			 NFS_V4_RECOV_ROOT, strerror(errno));
 	}
 
-	snprintf(v4_recov_dir, sizeof(v4_recov_dir), "%s/%s", recov_root,
+	snprintf(v4_recov_dir, sizeof(v4_recov_dir), "%s/%s", NFS_V4_RECOV_ROOT,
 		 NFS_V4_RECOV_DIR);
 	err = mkdir(v4_recov_dir, 0700);
 	if (err == -1 && errno != EEXIST) {
@@ -96,12 +97,12 @@ static void fs_ng_create_recov_dir(void)
 			LogEvent(COMPONENT_CLIENTID,
 				 "Failed to gethostname: %s",
 				 strerror(errno));
-			return;
+			return -errno;
 		}
 	}
 
 	snprintf(v4_recov_link, sizeof(v4_recov_link), "%s/%s/%s",
-		 recov_root, NFS_V4_RECOV_DIR, host);
+		 NFS_V4_RECOV_ROOT, NFS_V4_RECOV_DIR, host);
 
 	snprintf(v4_recov_dir, sizeof(v4_recov_dir), "%s.XXXXXX",
 		 v4_recov_link);
@@ -114,6 +115,7 @@ static void fs_ng_create_recov_dir(void)
 	}
 
 	legacy_fs_db_migrate();
+	return 0;
 }
 
 /**
@@ -301,7 +303,7 @@ static void fs_ng_read_recov_clids(nfs_grace_start_t *gsp,
 	switch (gsp->event) {
 	case EVENT_TAKE_NODEID:
 		snprintf(path, sizeof(path), "%s/%s/node%d",
-			 recov_root, NFS_V4_RECOV_DIR,
+			 NFS_V4_RECOV_ROOT, NFS_V4_RECOV_DIR,
 			 gsp->nodeid);
 		break;
 	default:
@@ -372,7 +374,7 @@ static void fs_ng_swap_recov_dir(void)
 
 static struct nfs4_recovery_backend fs_ng_backend = {
 	.recovery_init = fs_ng_create_recov_dir,
-	.recovery_cleanup = fs_ng_swap_recov_dir,
+	.end_grace = fs_ng_swap_recov_dir,
 	.recovery_read_clids = fs_ng_read_recov_clids,
 	.add_clid = fs_add_clid,
 	.rm_clid = fs_rm_clid,

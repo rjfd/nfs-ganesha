@@ -1,14 +1,45 @@
+/*
+ * vim:noexpandtab:shiftwidth=8:tabstop=8:
+ *
+ * Copyright (C) Panasas Inc., 2011
+ * Author: Jim Lieb jlieb@panasas.com
+ *
+ * contributeur : Philippe DENIEL   philippe.deniel@cea.fr
+ *                Thomas LEIBOVICI  thomas.leibovici@cea.fr
+ *
+ *   This library is free software; you can redistribute it and/or modify
+ *   it under the terms of the GNU Lesser General Public License as published
+ *   by the Free Software Foundation; either version 2.1 of the License, or
+ *   (at your option) any later version.
+ *
+ *   This library is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
+ *   the GNU Lesser General Public License for more details.
+ *
+ *   You should have received a copy of the GNU Lesser General Public License
+ *   along with this library; if not, write to the Free Software
+ *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ */
+
+/**
+ * @brief NULLFS methods for handles
+ */
+
 /* NULLFS methods for handles
  */
 
-struct nullfs_fsal_obj_handle;
+#ifndef NULLFS_METHODS_H
+#define NULLFS_METHODS_H
 
-struct next_ops {
-	struct export_ops exp_ops;	/*< Vector of operations */
-	struct fsal_obj_ops obj_ops;	/*< Shared handle methods vector */
-	struct fsal_dsh_ops dsh_ops;	/*< Shared handle methods vector */
-	const struct fsal_up_vector *up_ops;	/*< Upcall operations */
+struct null_fsal_module {
+	struct fsal_module module;
+	struct fsal_obj_ops handle_ops;
 };
+
+extern struct null_fsal_module NULLFS;
+
+struct nullfs_fsal_obj_handle;
 
 /**
  * Structure used to store data for read_dirents callback.
@@ -22,8 +53,6 @@ struct nullfs_readdir_state {
 	void *dir_state; /*< State to be sent to the next callback. */
 };
 
-
-extern struct next_ops next_ops;
 extern struct fsal_up_vector fsal_up_top;
 void nullfs_handle_ops_init(struct fsal_obj_ops *ops);
 
@@ -105,24 +134,16 @@ fsal_openflags_t nullfs_status2(struct fsal_obj_handle *obj_hdl,
 fsal_status_t nullfs_reopen2(struct fsal_obj_handle *obj_hdl,
 			     struct state_t *state,
 			     fsal_openflags_t openflags);
-fsal_status_t nullfs_read2(struct fsal_obj_handle *obj_hdl,
-			   bool bypass,
-			   struct state_t *state,
-			   uint64_t offset,
-			   size_t buf_size,
-			   void *buffer,
-			   size_t *read_amount,
-			   bool *eof,
-			   struct io_info *info);
-fsal_status_t nullfs_write2(struct fsal_obj_handle *obj_hdl,
-			    bool bypass,
-			    struct state_t *state,
-			    uint64_t offset,
-			    size_t buf_size,
-			    void *buffer,
-			    size_t *write_amount,
-			    bool *fsal_stable,
-			    struct io_info *info);
+void nullfs_read2(struct fsal_obj_handle *obj_hdl,
+		  bool bypass,
+		  fsal_async_cb done_cb,
+		  struct fsal_io_arg *read_arg,
+		  void *caller_arg);
+void nullfs_write2(struct fsal_obj_handle *obj_hdl,
+		   bool bypass,
+		   fsal_async_cb done_cb,
+		   struct fsal_io_arg *write_arg,
+		   void *caller_arg);
 fsal_status_t nullfs_seek2(struct fsal_obj_handle *obj_hdl,
 			   struct state_t *state,
 			   struct io_info *info);
@@ -139,6 +160,9 @@ fsal_status_t nullfs_lock_op2(struct fsal_obj_handle *obj_hdl,
 			      fsal_lock_param_t *conflicting_lock);
 fsal_status_t nullfs_close2(struct fsal_obj_handle *obj_hdl,
 			    struct state_t *state);
+fsal_status_t nullfs_fallocate(struct fsal_obj_handle *obj_hdl,
+			       struct state_t *state, uint64_t offset,
+			       uint64_t length, bool allocate);
 
 /* extended attributes management */
 fsal_status_t nullfs_list_ext_attrs(struct fsal_obj_handle *obj_hdl,
@@ -152,23 +176,26 @@ fsal_status_t nullfs_getextattr_id_by_name(struct fsal_obj_handle *obj_hdl,
 					   unsigned int *pxattr_id);
 fsal_status_t nullfs_getextattr_value_by_name(struct fsal_obj_handle *obj_hdl,
 					      const char *xattr_name,
-					      caddr_t buffer_addr,
+					      void *buffer_addr,
 					      size_t buffer_size,
 					      size_t *p_output_size);
 fsal_status_t nullfs_getextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					    unsigned int xattr_id,
-					    caddr_t buffer_addr,
+					    void *buffer_addr,
 					    size_t buffer_size,
 					    size_t *p_output_size);
 fsal_status_t nullfs_setextattr_value(struct fsal_obj_handle *obj_hdl,
 				      const char *xattr_name,
-				      caddr_t buffer_addr, size_t buffer_size,
+				      void *buffer_addr,
+				      size_t buffer_size,
 				      int create);
 fsal_status_t nullfs_setextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					    unsigned int xattr_id,
-					    caddr_t buffer_addr,
+					    void *buffer_addr,
 					    size_t buffer_size);
 fsal_status_t nullfs_remove_extattr_by_id(struct fsal_obj_handle *obj_hdl,
 					  unsigned int xattr_id);
 fsal_status_t nullfs_remove_extattr_by_name(struct fsal_obj_handle *obj_hdl,
 					    const char *xattr_name);
+
+#endif			/* NULLFS_METHODS_H */

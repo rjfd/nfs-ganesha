@@ -118,9 +118,9 @@ int _9p_init(void)
 
 void _9p_init_opctx(struct _9p_fid *pfid, struct _9p_request_data *req9p)
 {
-	if (pfid->export != NULL) {
+	if (pfid->fid_export != NULL) {
 		/* export affectation (require refcount handling). */
-		if (op_ctx->ctx_export != pfid->export) {
+		if (op_ctx->ctx_export != pfid->fid_export) {
 			if (op_ctx->ctx_export != NULL) {
 				LogCrit(COMPONENT_9P,
 					"Op_ctx was already initialized, or was not allocated/cleaned up properly.");
@@ -134,8 +134,8 @@ void _9p_init_opctx(struct _9p_fid *pfid, struct _9p_request_data *req9p)
 				assert(false);
 			}
 
-			get_gsh_export_ref(pfid->export);
-			op_ctx->ctx_export = pfid->export;
+			get_gsh_export_ref(pfid->fid_export);
+			op_ctx->ctx_export = pfid->fid_export;
 			op_ctx->fsal_export = op_ctx->ctx_export->fsal_export;
 		}
 	}
@@ -327,7 +327,7 @@ void free_fid(struct _9p_fid *pfid)
 		if ((pfid->pentry->type == REGULAR_FILE) && pfid->opens) {
 			/* We need to close the state before freeing the state.
 			 */
-			(void) pfid->pentry->obj_ops.close2(
+			(void) pfid->pentry->obj_ops->close2(
 						pfid->pentry,
 						pfid->state);
 		}
@@ -337,13 +337,13 @@ void free_fid(struct _9p_fid *pfid)
 	}
 
 	if (pfid->pentry != NULL)
-		pfid->pentry->obj_ops.put_ref(pfid->pentry);
+		pfid->pentry->obj_ops->put_ref(pfid->pentry);
 
 	if (pfid->ppentry != NULL)
-		pfid->ppentry->obj_ops.put_ref(pfid->ppentry);
+		pfid->ppentry->obj_ops->put_ref(pfid->ppentry);
 
-	if (pfid->export != NULL)
-		put_gsh_export(pfid->export);
+	if (pfid->fid_export != NULL)
+		put_gsh_export(pfid->fid_export);
 
 	if (pfid->ucred != NULL)
 		release_9p_user_cred_ref(pfid->ucred);
@@ -379,7 +379,7 @@ int _9p_tools_clunk(struct _9p_fid *pfid)
 		}
 
 		fsal_status =
-		    pfid->pentry->obj_ops.setextattr_value(
+		    pfid->pentry->obj_ops->setextattr_value(
 				pfid->pentry,
 				pfid->xattr->xattr_name,
 				pfid->xattr->xattr_content,
@@ -400,7 +400,7 @@ int _9p_tools_clunk(struct _9p_fid *pfid)
 			 object_file_type_to_str(pfid->pentry->type),
 			 pfid->pentry);
 
-		fsal_status = pfid->pentry->obj_ops.close2(pfid->pentry,
+		fsal_status = pfid->pentry->obj_ops->close2(pfid->pentry,
 							   pfid->state);
 
 		if (FSAL_IS_ERROR(fsal_status)) {

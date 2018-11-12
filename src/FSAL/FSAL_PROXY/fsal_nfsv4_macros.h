@@ -18,9 +18,7 @@
 
 #include "fsal.h"
 #if 0
-#include "fsal_internal.h"
 #include "fsal_convert.h"
-#include "fsal_common.h"
 #endif
 
 #ifndef ARRAY_SIZE
@@ -68,9 +66,9 @@ do {									\
 	op->nfs_argop4_u.opreclaim_complete.rca_one_fs = false;		\
 } while (0)
 
-#define COMPOUNDV4_ARG_ADD_OP_CREATE_SESSION(opcnt, argarray, cid, seqid, info)\
+#define COMPOUNDV4_ARG_ADD_OP_CREATE_SESSION(opcnt, argarray, cid,      \
+		seqid, info, sec_parms4)				\
 do {									\
-	callback_sec_parms4 csa_sec_parms_val;				\
 	struct channel_attrs4 *fore_attrs;				\
 	struct channel_attrs4 *back_attrs;				\
 	CREATE_SESSION4args *opcreate_session;				\
@@ -101,8 +99,8 @@ do {									\
 	back_attrs->ca_rdma_ird.ca_rdma_ird_val = NULL;			\
 	opcreate_session->csa_cb_program = info->srv_prognum;		\
 	opcreate_session->csa_sec_parms.csa_sec_parms_len = 1;		\
-	csa_sec_parms_val.cb_secflavor = AUTH_NONE;			\
-	opcreate_session->csa_sec_parms.csa_sec_parms_val = &csa_sec_parms_val;\
+	(sec_parms4)->cb_secflavor = AUTH_NONE;				\
+	opcreate_session->csa_sec_parms.csa_sec_parms_val = (sec_parms4); \
 } while (0)
 
 #define COMPOUNDV4_ARG_ADD_OP_PUTROOTFH(opcnt, argarray)  \
@@ -491,8 +489,8 @@ do { \
 
 #define COMPOUNDV4_EXECUTE_SIMPLE(pcontext, argcompound, rescompound)   \
 	  clnt_call(pcontext->rpc_client, NFSPROC4_COMPOUND,		\
-		    (xdrproc_t)xdr_COMPOUND4args, (caddr_t)&argcompound, \
-		    (xdrproc_t)xdr_COMPOUND4res,  (caddr_t)&rescompound, \
+		    (xdrproc_t)xdr_COMPOUND4args, &argcompound,		\
+		    (xdrproc_t)xdr_COMPOUND4res,  &rescompound,		\
 		    timeout)
 
 #endif				/* _FSAL_NFSV4_MACROS_H */

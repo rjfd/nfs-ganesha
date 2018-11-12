@@ -80,6 +80,7 @@
 #include "sal_data.h"
 #include "nfs_init.h"
 #include "mdcache.h"
+#include "nfs_proto_tools.h"
 
 
 #ifdef USE_BLKID
@@ -166,12 +167,16 @@ void free_export_ops(struct fsal_export *exp_hdl)
 /* fsal_export to fsal_obj_handle helpers
  */
 
+void fsal_default_obj_ops_init(struct fsal_obj_ops *obj_ops)
+{
+	*obj_ops = def_handle_ops;
+}
+
 void fsal_obj_handle_init(struct fsal_obj_handle *obj, struct fsal_export *exp,
 			  object_file_type_t type)
 {
 	pthread_rwlockattr_t attrs;
 
-	memcpy(&obj->obj_ops, &def_handle_ops, sizeof(struct fsal_obj_ops));
 	obj->fsal = exp->fsal;
 	obj->type = type;
 	pthread_rwlockattr_init(&attrs);
@@ -185,6 +190,8 @@ void fsal_obj_handle_init(struct fsal_obj_handle *obj, struct fsal_export *exp,
 	PTHREAD_RWLOCK_wrlock(&obj->fsal->lock);
 	glist_add(&obj->fsal->handles, &obj->handles);
 	PTHREAD_RWLOCK_unlock(&obj->fsal->lock);
+
+	pthread_rwlockattr_destroy(&attrs);
 }
 
 void fsal_obj_handle_fini(struct fsal_obj_handle *obj)
@@ -220,6 +227,8 @@ void fsal_pnfs_ds_init(struct fsal_pnfs_ds *pds, struct fsal_module *fsal)
 	PTHREAD_RWLOCK_wrlock(&fsal->lock);
 	glist_add(&fsal->servers, &pds->server);
 	PTHREAD_RWLOCK_unlock(&fsal->lock);
+
+	pthread_rwlockattr_destroy(&attrs);
 }
 
 void fsal_pnfs_ds_fini(struct fsal_pnfs_ds *pds)
@@ -399,52 +408,63 @@ const char *fsal_dir_result_str(enum fsal_dir_result result)
  *
  * @param[in] info The info to dump
  */
-void display_fsinfo(struct fsal_staticfsinfo_t *info)
+void display_fsinfo(struct fsal_module *fsal)
 {
-	LogDebug(COMPONENT_FSAL, "FileSystem info: {");
+	LogDebug(COMPONENT_FSAL, "FileSystem info for FSAL %s {", fsal->name);
 	LogDebug(COMPONENT_FSAL, "  maxfilesize  = %" PRIX64 "    ",
-		 (uint64_t) info->maxfilesize);
-	LogDebug(COMPONENT_FSAL, "  maxlink  = %" PRIu32, info->maxlink);
-	LogDebug(COMPONENT_FSAL, "  maxnamelen  = %" PRIu32, info->maxnamelen);
-	LogDebug(COMPONENT_FSAL, "  maxpathlen  = %" PRIu32, info->maxpathlen);
-	LogDebug(COMPONENT_FSAL, "  no_trunc  = %d ", info->no_trunc);
+		 (uint64_t) fsal->fs_info.maxfilesize);
+	LogDebug(COMPONENT_FSAL, "  maxlink  = %" PRIu32,
+		fsal->fs_info.maxlink);
+	LogDebug(COMPONENT_FSAL, "  maxnamelen  = %" PRIu32,
+		fsal->fs_info.maxnamelen);
+	LogDebug(COMPONENT_FSAL, "  maxpathlen  = %" PRIu32,
+		fsal->fs_info.maxpathlen);
+	LogDebug(COMPONENT_FSAL, "  no_trunc  = %d ",
+		fsal->fs_info.no_trunc);
 	LogDebug(COMPONENT_FSAL, "  chown_restricted  = %d ",
-		 info->chown_restricted);
+		 fsal->fs_info.chown_restricted);
 	LogDebug(COMPONENT_FSAL, "  case_insensitive  = %d ",
-		 info->case_insensitive);
+		 fsal->fs_info.case_insensitive);
 	LogDebug(COMPONENT_FSAL, "  case_preserving  = %d ",
-		 info->case_preserving);
-	LogDebug(COMPONENT_FSAL, "  link_support  = %d  ", info->link_support);
+		 fsal->fs_info.case_preserving);
+	LogDebug(COMPONENT_FSAL, "  link_support  = %d  ",
+		fsal->fs_info.link_support);
 	LogDebug(COMPONENT_FSAL, "  symlink_support  = %d  ",
-		 info->symlink_support);
-	LogDebug(COMPONENT_FSAL, "  lock_support  = %d  ", info->lock_support);
+		 fsal->fs_info.symlink_support);
+	LogDebug(COMPONENT_FSAL, "  lock_support  = %d  ",
+		fsal->fs_info.lock_support);
 	LogDebug(COMPONENT_FSAL, "  lock_support_async_block  = %d  ",
-		 info->lock_support_async_block);
-	LogDebug(COMPONENT_FSAL, "  named_attr  = %d  ", info->named_attr);
+		 fsal->fs_info.lock_support_async_block);
+	LogDebug(COMPONENT_FSAL, "  named_attr  = %d  ",
+		fsal->fs_info.named_attr);
 	LogDebug(COMPONENT_FSAL, "  unique_handles  = %d  ",
-		 info->unique_handles);
-	LogDebug(COMPONENT_FSAL, "  acl_support  = %hu  ", info->acl_support);
-	LogDebug(COMPONENT_FSAL, "  cansettime  = %d  ", info->cansettime);
-	LogDebug(COMPONENT_FSAL, "  homogenous  = %d  ", info->homogenous);
+		 fsal->fs_info.unique_handles);
+	LogDebug(COMPONENT_FSAL, "  acl_support  = %hu  ",
+		fsal->fs_info.acl_support);
+	LogDebug(COMPONENT_FSAL, "  cansettime  = %d  ",
+		fsal->fs_info.cansettime);
+	LogDebug(COMPONENT_FSAL, "  homogenous  = %d  ",
+		fsal->fs_info.homogenous);
 	LogDebug(COMPONENT_FSAL, "  supported_attrs  = %" PRIX64,
-		 info->supported_attrs);
-	LogDebug(COMPONENT_FSAL, "  maxread  = %" PRIu64, info->maxread);
-	LogDebug(COMPONENT_FSAL, "  maxwrite  = %" PRIu64, info->maxwrite);
-	LogDebug(COMPONENT_FSAL, "  umask  = %X ", info->umask);
+		 fsal->fs_info.supported_attrs);
+	LogDebug(COMPONENT_FSAL, "  maxread  = %" PRIu64,
+		fsal->fs_info.maxread);
+	LogDebug(COMPONENT_FSAL, "  maxwrite  = %" PRIu64,
+		fsal->fs_info.maxwrite);
+	LogDebug(COMPONENT_FSAL, "  umask  = %X ",
+		fsal->fs_info.umask);
 	LogDebug(COMPONENT_FSAL, "  auth_exportpath_xdev  = %d  ",
-		 info->auth_exportpath_xdev);
-	LogDebug(COMPONENT_FSAL, "  xattr_access_rights = %#o ",
-		 info->xattr_access_rights);
+		 fsal->fs_info.auth_exportpath_xdev);
 	LogDebug(COMPONENT_FSAL, "  delegations = %d  ",
-		 info->delegations);
+		 fsal->fs_info.delegations);
 	LogDebug(COMPONENT_FSAL, "  pnfs_mds = %d  ",
-		 info->pnfs_mds);
+		 fsal->fs_info.pnfs_mds);
 	LogDebug(COMPONENT_FSAL, "  pnfs_ds = %d  ",
-		 info->pnfs_ds);
+		 fsal->fs_info.pnfs_ds);
 	LogDebug(COMPONENT_FSAL, "  fsal_trace = %d  ",
-		 info->fsal_trace);
+		 fsal->fs_info.fsal_trace);
 	LogDebug(COMPONENT_FSAL, "  fsal_grace = %d  ",
-		 info->fsal_grace);
+		 fsal->fs_info.fsal_grace);
 	LogDebug(COMPONENT_FSAL, "}");
 }
 
@@ -1231,6 +1251,7 @@ int populate_posix_file_systems(bool force)
 {
 	FILE *fp;
 	struct mntent *mnt;
+	struct stat st;
 	int retval = 0;
 	struct glist_head *glist;
 	struct fsal_filesystem *fs;
@@ -1264,6 +1285,10 @@ int populate_posix_file_systems(bool force)
 	while ((mnt = getmntent(fp)) != NULL) {
 		if (mnt->mnt_dir == NULL)
 			continue;
+
+		if (stat(mnt->mnt_dir, &st) < 0 || !S_ISDIR(st.st_mode)) {
+			continue;
+		}
 
 		posix_create_file_system(mnt);
 	}
@@ -1793,7 +1818,7 @@ fsal_status_t fsal_remove_access(struct fsal_obj_handle *dir_hdl,
 
 	/* draft-ietf-nfsv4-acls section 12 */
 	/* If no execute on dir, deny */
-	fsal_status = dir_hdl->obj_ops.test_access(
+	fsal_status = dir_hdl->obj_ops->test_access(
 				dir_hdl,
 				FSAL_MODE_MASK_SET(FSAL_X_OK) |
 				FSAL_ACE4_MASK_SET(FSAL_ACE_PERM_EXECUTE),
@@ -1807,13 +1832,13 @@ fsal_status_t fsal_remove_access(struct fsal_obj_handle *dir_hdl,
 
 	/* We can delete if we have *either* ACE_PERM_DELETE or
 	 * ACE_PERM_DELETE_CHILD.  7530 - 6.2.1.3.2 */
-	del_status = rem_hdl->obj_ops.test_access(
+	del_status = rem_hdl->obj_ops->test_access(
 				rem_hdl,
 				FSAL_MODE_MASK_SET(FSAL_W_OK) |
 				FSAL_ACE4_MASK_SET(FSAL_ACE_PERM_DELETE) |
 				FSAL_ACE4_REQ_FLAG,
 				NULL, NULL, false);
-	fsal_status = dir_hdl->obj_ops.test_access(
+	fsal_status = dir_hdl->obj_ops->test_access(
 				dir_hdl,
 				FSAL_MODE_MASK_SET(FSAL_W_OK) |
 				FSAL_ACE4_MASK_SET(FSAL_ACE_PERM_DELETE_CHILD) |
@@ -1838,7 +1863,7 @@ fsal_status_t fsal_remove_access(struct fsal_obj_handle *dir_hdl,
 
 		/* Neither ACE_PERM_DELETE nor ACE_PERM_DELETE_CHILD are set.
 		 * Check for ADD_FILE in parent */
-		fsal_status = dir_hdl->obj_ops.test_access(
+		fsal_status = dir_hdl->obj_ops->test_access(
 				dir_hdl,
 				FSAL_MODE_MASK_SET(FSAL_W_OK) |
 				FSAL_ACE4_MASK_SET(isdir ?
@@ -1883,7 +1908,7 @@ fsal_status_t fsal_rename_access(struct fsal_obj_handle *src_dir_hdl,
 			FSAL_ACE4_MASK_SET(FSAL_ACE_PERM_ADD_SUBDIRECTORY);
 	else
 		access_type |= FSAL_ACE4_MASK_SET(FSAL_ACE_PERM_ADD_FILE);
-	status = dst_dir_hdl->obj_ops.test_access(dst_dir_hdl, access_type,
+	status = dst_dir_hdl->obj_ops->test_access(dst_dir_hdl, access_type,
 						  NULL, NULL, false);
 	if (FSAL_IS_ERROR(status))
 		return status;
@@ -2391,8 +2416,22 @@ fsal_status_t merge_share(struct fsal_share *orig_share,
  * opened, in this case, all that actually happens is the share reservation
  * check (which may result in the lock being held).
  *
+ * If openflags is FSAL_O_ANY, the caller will utilize the global file
+ * descriptor if it is open, otherwise it will use a temporary file descriptor.
+ * The primary use of this is to not open long lasting global file descriptors
+ * for getattr and setattr calls. The other users of FSAL_O_ANY are NFSv3 LOCKT
+ * for which this behavior is also desireable and NFSv3 UNLOCK where there
+ * SHOULD be an open file descriptor attached to state, but if not, a temporary
+ * file descriptor will work fine (and the resulting unlock won't do anything
+ * since we just opened the temporary file descriptor).
+ *
  * @param[in]  obj_hdl     File on which to operate
  * @param[in]  check_share Indicates we must check for share conflict
+ * @param[in]  bypass         If state doesn't indicate a share reservation,
+ *                               bypass any deny read
+ * @param[in] bypass       If check_share is true, indicates to bypass
+ *                         share_deny_read and share_deny_write but
+ *                         not share_deny_write_mand
  * @param[in]  openflags   Mode for open
  * @param[in]  my_fd       The file descriptor associated with the object
  * @param[in]  share       The fsal_share associated with the object
@@ -2468,7 +2507,21 @@ again:
 		/* Drop the read lock */
 		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
 
-		if (retried) {
+		if (openflags == FSAL_O_ANY) {
+			/* If caller is looking for any open descriptor, don't
+			 * bother trying to open global file descriptor if it
+			 * isn't already open, just go ahead an open a temporary
+			 * file descriptor.
+			 */
+			LogDebug(COMPONENT_FSAL,
+				 "Open in FSAL_O_ANY mode failed, just open temporary file descriptor.");
+
+			/* Although the global file descriptor isn't "busy" (we
+			 * can't acquire a write lock, re-use of EBUSY in this
+			 * case simplifies the code below.
+			 */
+			rc = EBUSY;
+		} else if (retried) {
 			/* Since we drop write lock for 'obj_hdl->obj_lock'
 			 * and acquire read lock for 'obj_hdl->obj_lock' after
 			 * opening the global file descriptor, some other
@@ -2476,11 +2529,11 @@ again:
 			 * verification of 'openflags' to fail.
 			 *
 			 * We will now attempt to just provide a temporary
-			 * file descriptor
+			 * file descriptor. EBUSY is sort of true...
 			 */
 			LogDebug(COMPONENT_FSAL,
 				 "Retry failed.");
-			*has_lock = false;
+			rc = EBUSY;
 		} else {
 			/* Switch to write lock on object to protect file
 			 * descriptor.
@@ -2494,8 +2547,12 @@ again:
 			rc = pthread_rwlock_trywrlock(&obj_hdl->obj_lock);
 		}
 
-		if (retried || rc == EBUSY) {
-			/* Someone else is using the file descriptor.
+		if (rc == EBUSY) {
+			/* Someone else is using the file descriptor or it
+			 * isn't open at all and the caller is looking for
+			 * any mode of open so a temporary file descriptor will
+			 * work fine.
+			 *
 			 * Just provide a temporary file descriptor.
 			 * We still take a read lock so we can protect the
 			 * share reservation for the duration of the caller's
@@ -2563,6 +2620,8 @@ again:
 
 		if (not_open_usable(my_fd->openflags, openflags)) {
 			if (my_fd->openflags != FSAL_O_CLOSED) {
+				ssize_t count;
+
 				/* Add desired mode to existing mode. */
 				try_openflags = openflags | my_fd->openflags;
 
@@ -2578,7 +2637,12 @@ again:
 					*has_lock = false;
 					return status;
 				}
-				(void) atomic_dec_size_t(&open_fd_count);
+				count = atomic_dec_size_t(&open_fd_count);
+				if (count < 0) {
+					LogCrit(COMPONENT_FSAL,
+					    "open_fd_count is negative: %zd",
+					    count);
+				}
 			} else if (openflags == FSAL_O_ANY) {
 				try_openflags = FSAL_O_READ;
 			} else {
@@ -2659,6 +2723,9 @@ again:
  * opened, in this case, all that actually happens is the share reservation
  * check (which may result in the lock being held).
  *
+ * Note that FSAL_O_ANY may be passed on to fsal_reopen_obj, see the
+ * documentation of that function for the implications.
+ *
  * @param[in,out] out_fd         File descriptor that is to be used
  * @param[in]     obj_hdl        File on which to operate
  * @param[in]     obj_fd         The file descriptor associated with the object
@@ -2701,8 +2768,9 @@ fsal_status_t fsal_find_fd(struct fsal_fd **out_fd,
 	state_fd = (struct fsal_fd *) (state + 1);
 
 	LogFullDebug(COMPONENT_FSAL,
-		     "state_fd->openflags = %d openflags = %d",
-		     state_fd->openflags, openflags);
+		     "state_fd->openflags = %d openflags = %d%s",
+		     state_fd->openflags, openflags,
+		     open_for_locks ? " Open For Locks" : "");
 
 	if (open_correct(state_fd->openflags, openflags)) {
 		/* It was valid, return it.
@@ -2724,24 +2792,33 @@ fsal_status_t fsal_find_fd(struct fsal_fd **out_fd,
 		}
 
 		/* This is being opened for locks, we will not be able to
-		 * re-open so open for read/write unless openstate indicates
-		 * something different.
+		 * re-open so open for read/write. If that fails permission
+		 * check and openstate is available, retry with that state's
+		 * access mode.
 		 */
-		if (state->state_data.lock.openstate != NULL) {
+		openflags = FSAL_O_RDWR;
+
+		status = open_func(obj_hdl, openflags, state_fd);
+
+		if (status.major == ERR_FSAL_ACCESS &&
+		    state->state_data.lock.openstate != NULL) {
+			/* Got an EACCESS and openstate is available, try
+			 * again with it's openflags.
+			 */
 			struct fsal_fd *related_fd = (struct fsal_fd *)
 					(state->state_data.lock.openstate + 1);
 
 			openflags = related_fd->openflags & FSAL_O_RDWR;
-		} else {
-			/* No associated open, open read/write. */
-			openflags = FSAL_O_RDWR;
-		}
 
-		status = open_func(obj_hdl, openflags, state_fd);
+			status = open_func(obj_hdl, openflags, state_fd);
+		}
 
 		if (FSAL_IS_ERROR(status)) {
 			LogCrit(COMPONENT_FSAL,
-				"Open for locking failed");
+				"Open for locking failed for access %s",
+				openflags == FSAL_O_RDWR ? "Read/Write"
+				: openflags == FSAL_O_READ ? "Read"
+				: "Write");
 		} else {
 			LogFullDebug(COMPONENT_FSAL,
 				     "Opened state_fd %p", state_fd);
@@ -2869,6 +2946,45 @@ bool check_verifier_attrlist(struct attrlist *attrs, fsal_verifier_t verifier)
 
 	return attrs->atime.tv_sec == verf_hi &&
 	       attrs->mtime.tv_sec == verf_lo;
+}
+
+/**
+ * @brief Common is_referral routine for FSALs that use the special mode
+ *
+ * @param[in]     obj_hdl       Handle on which to operate
+ * @param[in|out] attrs         Attributes of the handle
+ * @param[in]     cache_attrs   Cache the received attrs
+ *
+ * Most FSALs don't support referrals, but those that do often use a special
+ * mode bit combination on a directory for a junction. This routine tests for
+ * that and returns true if it is a referral.
+ */
+bool fsal_common_is_referral(struct fsal_obj_handle *obj_hdl,
+			     struct attrlist *attrs, bool cache_attrs)
+{
+	if ((attrs->valid_mask & (ATTR_TYPE | ATTR_MODE)) == 0) {
+		/* Required attributes are not available, need to fetch them */
+		fsal_status_t status = {ERR_FSAL_NO_ERROR, 0};
+
+		attrs->request_mask |= (ATTR_TYPE | ATTR_MODE);
+
+		status = obj_hdl->obj_ops->getattrs(obj_hdl, attrs);
+		if (FSAL_IS_ERROR(status)) {
+			LogEvent(COMPONENT_FSAL, "Failed to get attributes for "
+				 "referral, request_mask: %lu",
+				 attrs->request_mask);
+			return false;
+		}
+	}
+
+	if (!fsal_obj_handle_is(obj_hdl, DIRECTORY))
+		return false;
+
+	if (!is_sticky_bit_set(obj_hdl, attrs))
+		return false;
+
+	LogDebug(COMPONENT_FSAL, "Referral found for handle %p", obj_hdl);
+	return true;
 }
 
 /** @} */

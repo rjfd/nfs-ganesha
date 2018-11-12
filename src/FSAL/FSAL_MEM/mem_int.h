@@ -93,12 +93,13 @@ struct mem_fsal_obj_handle {
 			char *link_contents;
 		} mh_symlink;
 	};
-	struct glist_head dirents; /* List of dirents pointing to obj */
+	struct glist_head dirents; /**< List of dirents pointing to obj */
 	struct glist_head mfo_exp_entry; /**< Link into mfs_objs */
 	struct mem_fsal_export *mfo_exp; /**< Export owning object */
 	char *m_name;	/**< Base name of obj, for debugging */
 	uint32_t datasize;
 	bool is_export;
+	uint32_t refcount; /**< We persist handles, so we need a refcount */
 	char data[0]; /* Allocated data */
 };
 
@@ -170,8 +171,8 @@ void mem_clean_all_dirents(struct mem_fsal_obj_handle *parent);
 struct mem_fsal_module {
 	/** Module we're wrapping */
 	struct fsal_module fsal;
-	/** Our FS INFO */
-	struct fsal_staticfsinfo_t fs_info;
+	/** fsal_obj_handle ops vector */
+	struct fsal_obj_ops handle_ops;
 	/** List of MEM exports. TODO Locking when we care */
 	struct glist_head mem_exports;
 	/** Config - size of data in inode */

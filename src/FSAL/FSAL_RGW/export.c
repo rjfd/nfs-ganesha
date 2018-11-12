@@ -103,34 +103,89 @@ static fsal_status_t lookup_path(struct fsal_export *export_pub,
 	int rc;
 	/* temp filehandle */
 	struct rgw_file_handle *rgw_fh;
+	/* bucket name */
+	const char *bucket_name = NULL;
+	/* global directory */
+	const char *global_dir = NULL;
 
 	*pub_handle = NULL;
 
-	/* should only be "/" or "bucket_name" */
-	if (strcmp(path, "/") && strchr(path, '/')) {
+	/* pattern like "bucket_name/" or "bucket_name/dir/" should be avoid */
+	if (strcmp(path, "/") && !strcmp((path + strlen(path) - 1), "/")) {
 		status.major = ERR_FSAL_INVAL;
 		return status;
 	}
 
-#ifndef USE_FSAL_RGW_MOUNT2
+	/* should only be "/" or "bucket_name" or "bucket_name/dir "*/
+	if (strcmp(path, "/") && strchr(path, '/') &&
+		(strchr(path, '/') - path) > 1) {
+		/* case : "bucket_name/dir" */
+		char *cp_path = strdup(path);
+
+		bucket_name = strsep(&cp_path, "/");
+		global_dir = path + strlen(bucket_name) + 1;
+	} else if (strcmp(path, "/") && strchr(path, '/') &&
+		(strchr(path, '/') - path) == 0) {
+		/* case : "/bucket_name" */
+		bucket_name = path + 1;
+	} else {
+		/* case : "/" or "bucket_name" */
+		bucket_name = path;
+	}
+
 	/* XXX in FSAL_CEPH, the equivalent code here looks for path == "/"
 	 * and returns the root handle with no extra ref.  That seems
 	 * suspicious, so let RGW figure it out (hopefully, that does not
 	 * leak refs)
 	 */
-	rc = rgw_lookup(export->rgw_fs, export->rgw_fs->root_fh, path,
-			&rgw_fh, RGW_LOOKUP_FLAG_NONE);
-	if (rc < 0)
-		return rgw2fsal_error(rc);
+#ifndef USE_FSAL_RGW_MOUNT2
+	if (global_dir == NULL) {
+		rc = rgw_lookup(export->rgw_fs,
+				export->rgw_fs->root_fh,
+				bucket_name, &rgw_fh, RGW_LOOKUP_FLAG_NONE);
+		if (rc < 0)
+			return rgw2fsal_error(rc);
+	}
 #else
-	rgw_fh = export->rgw_fs->root_fh;
+	if (global_dir == NULL) {
+		rgw_fh = export->rgw_fs->root_fh;
+	}
 #endif
+	if (global_dir != NULL) {
+		/* search fh of bucket */
+		struct rgw_file_handle *rgw_dh;
+
+		rc = rgw_lookup(export->rgw_fs,
+					export->rgw_fs->root_fh, bucket_name,
+					&rgw_dh, RGW_LOOKUP_FLAG_NONE);
+
+		if (rc < 0)
+			return rgw2fsal_error(rc);
+		/* search fh of global directory */
+		rc = rgw_lookup(export->rgw_fs, rgw_dh, global_dir,
+					&rgw_fh, RGW_LOOKUP_FLAG_RCB);
+		if (rc < 0)
+			return rgw2fsal_error(rc);
+		if (rgw_fh->fh_type == RGW_FS_TYPE_FILE) {
+			/* only directory can be an global fh */
+			status.major = ERR_FSAL_INVAL;
+			return status;
+		}
+	}
 
 	/* get Unix attrs */
-	rc = rgw_getattr(export->rgw_fs, export->rgw_fs->root_fh,
-			 &st, RGW_GETATTR_FLAG_NONE);
-	if (rc < 0) {
-		return rgw2fsal_error(rc);
+	if (global_dir == NULL) {
+		rc = rgw_getattr(export->rgw_fs, export->rgw_fs->root_fh,
+					&st, RGW_GETATTR_FLAG_NONE);
+		if (rc < 0) {
+			return rgw2fsal_error(rc);
+		}
+	} else {
+		rc = rgw_getattr(export->rgw_fs, rgw_fh,
+						&st, RGW_GETATTR_FLAG_NONE);
+		if (rc < 0) {
+			return rgw2fsal_error(rc);
+		}
 	}
 
 #ifndef USE_FSAL_RGW_MOUNT2
@@ -297,202 +352,6 @@ static fsal_status_t get_fs_dynamic_info(struct fsal_export *export_pub,
 }
 
 /**
- * @brief Query the FSAL's capabilities
- *
- * This function queries the capabilities of an FSAL export.
- *
- * @param[in] export_pub The public export handle
- * @param[in] option     The option to check
- *
- * @retval true if the option is supported.
- * @retval false if the option is unsupported (or unknown).
- */
-
-static bool fs_supports(struct fsal_export *export_pub,
-			fsal_fsinfo_options_t option)
-{
-	struct fsal_staticfsinfo_t *info = rgw_staticinfo(export_pub->fsal);
-
-	return fsal_supports(info, option);
-}
-
-/**
- * @brief Return the longest file supported
- *
- * This function returns the length of the longest file supported.
- *
- * @param[in] export_pub The public export
- *
- * @return UINT64_MAX.
- */
-
-static uint64_t fs_maxfilesize(struct fsal_export *export_pub)
-{
-	return INT64_MAX;
-}
-
-/**
- * @brief Return the longest read supported
- *
- * This function returns the length of the longest read supported.
- *
- * @param[in] export_pub The public export
- *
- * @return 4 mebibytes.
- */
-
-static uint32_t fs_maxread(struct fsal_export *export_pub)
-{
-	return 0x400000;
-}
-
-/**
- * @brief Return the longest write supported
- *
- * This function returns the length of the longest write supported.
- *
- * @param[in] export_pub The public export
- *
- * @return 4 mebibytes.
- */
-
-static uint32_t fs_maxwrite(struct fsal_export *export_pub)
-{
-	return 0x400000;
-}
-
-/**
- * @brief Return the maximum number of hard links to a file
- *
- * This function returns the maximum number of hard links supported to
- * any file.
- *
- * @param[in] export_pub The public export
- *
- * @return 1024.
- */
-
-static uint32_t fs_maxlink(struct fsal_export *export_pub)
-{
-	/* Ceph does not like hard links.  See the anchor table
-	   design.  We should fix this, but have to do it in the Ceph
-	   core. */
-	return 1024;
-}
-
-/**
- * @brief Return the maximum size of a Ceph filename
- *
- * This function returns the maximum filename length.
- *
- * @param[in] export_pub The public export
- *
- * @return UINT32_MAX.
- */
-
-static uint32_t fs_maxnamelen(struct fsal_export *export_pub)
-{
-	/* Ceph actually supports filenames of unlimited length, at
-	   least according to the protocol docs.  We may wish to
-	   constrain this later. */
-	return UINT32_MAX;
-}
-
-/**
- * @brief Return the maximum length of a Ceph path
- *
- * This function returns the maximum path length.
- *
- * @param[in] export_pub The public export
- *
- * @return UINT32_MAX.
- */
-
-static uint32_t fs_maxpathlen(struct fsal_export *export_pub)
-{
-	/* Similarly unlimited int he protocol */
-	return UINT32_MAX;
-}
-
-/**
- * @brief Return the lease time
- *
- * This function returns the lease time.
- *
- * @param[in] export_pub The public export
- *
- * @return five minutes.
- */
-
-static struct timespec fs_lease_time(struct fsal_export *export_pub)
-{
-	struct timespec lease = { 300, 0 };
-
-	return lease;
-}
-
-/**
- * @brief Return ACL support
- *
- * This function returns the export's ACL support.
- *
- * @param[in] export_pub The public export
- *
- * @return FSAL_ACLSUPPORT_DENY.
- */
-
-static fsal_aclsupp_t fs_acl_support(struct fsal_export *export_pub)
-{
-	return FSAL_ACLSUPPORT_DENY;
-}
-
-/**
- * @brief Return the attributes supported by this FSAL
- *
- * This function returns the mask of attributes this FSAL can support.
- *
- * @param[in] export_pub The public export
- *
- * @return supported_attributes as defined in internal.c.
- */
-
-static attrmask_t fs_supported_attrs(struct fsal_export *export_pub)
-{
-	return RGW_SUPPORTED_ATTRIBUTES;
-}
-
-/**
- * @brief Return the mode under which the FSAL will create files
- *
- * This function modifies the default mode on any new file created.
- *
- * @param[in] export_pub The public export
- *
- * @return 0 (usually).  Bits set here turn off bits in created files.
- */
-
-static uint32_t fs_umask(struct fsal_export *export_pub)
-{
-	return fsal_umask(rgw_staticinfo(export_pub->fsal));
-}
-
-/**
- * @brief Return the mode for extended attributes
- *
- * This function returns the access mode applied to extended
- * attributes.  Dubious.
- *
- * @param[in] export_pub The public export
- *
- * @return 0644.
- */
-
-static uint32_t fs_xattr_access_rights(struct fsal_export *export_pub)
-{
-	return fsal_xattr_access_rights(rgw_staticinfo(export_pub->fsal));
-}
-
-/**
  * @brief Set operations for exports
  *
  * This function overrides operations that we've implemented, leaving
@@ -508,17 +367,5 @@ void export_ops_init(struct export_ops *ops)
 	ops->wire_to_host = wire_to_host;
 	ops->create_handle = create_handle;
 	ops->get_fs_dynamic_info = get_fs_dynamic_info;
-	ops->fs_supports = fs_supports;
-	ops->fs_maxfilesize = fs_maxfilesize;
-	ops->fs_maxread = fs_maxread;
-	ops->fs_maxwrite = fs_maxwrite;
-	ops->fs_maxlink = fs_maxlink;
-	ops->fs_maxnamelen = fs_maxnamelen;
-	ops->fs_maxpathlen = fs_maxpathlen;
-	ops->fs_lease_time = fs_lease_time;
-	ops->fs_acl_support = fs_acl_support;
-	ops->fs_supported_attrs = fs_supported_attrs;
-	ops->fs_umask = fs_umask;
-	ops->fs_xattr_access_rights = fs_xattr_access_rights;
 	ops->alloc_state = rgw_alloc_state;
 }

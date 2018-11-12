@@ -59,10 +59,6 @@ static struct config_item mdcache_params[] = {
 		       mdcache_parameter, cache_size),
 	CONF_ITEM_BOOL("Use_Getattr_Directory_Invalidation", false,
 		       mdcache_parameter, getattr_dir_invalidation),
-	CONF_ITEM_UI32("Dir_Max_Deleted", 1, UINT32_MAX, 65536,
-		       mdcache_parameter, dir.avl_max_deleted),
-	CONF_ITEM_UI32("Dir_Max", 1, UINT32_MAX, 65536,
-		       mdcache_parameter, dir.avl_max),
 	CONF_ITEM_UI32("Dir_Chunk", 0, UINT32_MAX, 128,
 		       mdcache_parameter, dir.avl_chunk),
 	CONF_ITEM_UI32("Detached_Mult", 1, UINT32_MAX, 1,
@@ -81,7 +77,7 @@ static struct config_item mdcache_params[] = {
 		       mdcache_parameter, fd_lwmark_percent),
 	CONF_ITEM_UI32("Reaper_Work", 1, 2000, 0,
 		       mdcache_parameter, reaper_work),
-	CONF_ITEM_UI32("Reaper_Work_Per_Lane", 1, 2000, 50,
+	CONF_ITEM_UI32("Reaper_Work_Per_Lane", 1, UINT32_MAX, 50,
 		       mdcache_parameter, reaper_work_per_lane),
 	CONF_ITEM_UI32("Biggest_Window", 1, 100, 40,
 		       mdcache_parameter, biggest_window),
@@ -89,8 +85,6 @@ static struct config_item mdcache_params[] = {
 		       mdcache_parameter, required_progress),
 	CONF_ITEM_UI32("Futility_Count", 1, 50, 8,
 		       mdcache_parameter, futility_count),
-	CONF_ITEM_BOOL("Retry_Readdir", false,
-		       mdcache_parameter, retry_readdir),
 	CONFIG_EOL
 };
 

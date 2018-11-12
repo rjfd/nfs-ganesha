@@ -43,6 +43,63 @@
 #include "server_stats.h"
 #include "export_mgr.h"
 
+struct nfs4_write_data {
+	WRITE4res *res_WRITE4;		/**< Results for write */
+	state_owner_t *owner;		/**< Owner of state */
+};
+
+/**
+ * @brief Callback for NFS4 write done
+ *
+ * @param[in] obj		Object being acted on
+ * @param[in] ret		Return status of call
+ * @param[in] write_data		Data for write call
+ * @param[in] caller_data	Data for caller
+ */
+static void nfs4_write_cb(struct fsal_obj_handle *obj, fsal_status_t ret,
+			  void *write_data, void *caller_data)
+{
+	struct nfs4_write_data *data = caller_data;
+	struct fsal_io_arg *write_arg = write_data;
+	struct gsh_buffdesc verf_desc;
+
+	/* Fixup ERR_FSAL_SHARE_DENIED status */
+	if (ret.major == ERR_FSAL_SHARE_DENIED)
+		ret = fsalstat(ERR_FSAL_LOCKED, 0);
+
+	/* Get result */
+	data->res_WRITE4->status = nfs4_Errno_status(ret);
+
+	if (FSAL_IS_ERROR(ret)) {
+		goto done;
+	}
+
+	if (write_arg->fsal_stable)
+		data->res_WRITE4->WRITE4res_u.resok4.committed = FILE_SYNC4;
+	else
+		data->res_WRITE4->WRITE4res_u.resok4.committed = UNSTABLE4;
+
+	data->res_WRITE4->WRITE4res_u.resok4.count = write_arg->io_amount;
+
+	verf_desc.addr = data->res_WRITE4->WRITE4res_u.resok4.writeverf;
+	verf_desc.len = sizeof(verifier4);
+	op_ctx->fsal_export->exp_ops.get_write_verifier(op_ctx->fsal_export,
+							&verf_desc);
+
+done:
+	server_stats_io_done(write_arg->iov[0].iov_len, write_arg->io_amount,
+			     (data->res_WRITE4->status == NFS4_OK) ? true :
+			     false, true /*is_write*/);
+
+	if (data->owner != NULL) {
+		op_ctx->clientid = NULL;
+		dec_state_owner_ref(data->owner);
+	}
+
+	if (write_arg->state)
+		dec_state_t_ref(write_arg->state);
+}
+
 /**
  * @brief Write for a data server
  *
@@ -153,11 +210,7 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 	WRITE4args * const arg_WRITE4 = &op->nfs_argop4_u.opwrite;
 	WRITE4res * const res_WRITE4 = &resp->nfs_resop4_u.opwrite;
 	uint64_t size = 0;
-	size_t written_size = 0;
 	uint64_t offset;
-	bool sync = false;
-	void *bufferdata;
-	stable_how4 stable_how;
 	state_t *state_found = NULL;
 	state_t *state_open = NULL;
 	fsal_status_t fsal_status = {0, 0};
@@ -169,6 +222,9 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 		atomic_fetch_uint64_t(&op_ctx->ctx_export->MaxWrite);
 	uint64_t MaxOffsetWrite =
 		atomic_fetch_uint64_t(&op_ctx->ctx_export->MaxOffsetWrite);
+	struct nfs4_write_data write_data;
+	struct fsal_io_arg *write_arg = alloca(sizeof(*write_arg) +
+						sizeof(struct iovec));
 
 	/* Lock are not supported */
 	resp->resop = NFS4_OP_WRITE;
@@ -195,7 +251,7 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 	fsal_status = op_ctx->fsal_export->exp_ops.check_quota(
 						op_ctx->fsal_export,
 						op_ctx->ctx_export->fullpath,
-						FSAL_QUOTA_INODES);
+						FSAL_QUOTA_BLOCKS);
 
 	if (FSAL_IS_ERROR(fsal_status)) {
 		res_WRITE4->status = NFS4ERR_DQUOT;
@@ -251,8 +307,7 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 		case STATE_TYPE_DELEG:
 			/* Check if the delegation state allows READ */
 			sdeleg = &state_found->state_data.deleg;
-			if (!(sdeleg->sd_type & OPEN_DELEGATE_WRITE) ||
-				(sdeleg->sd_state != DELEG_GRANTED)) {
+			if (!(sdeleg->sd_type & OPEN_DELEGATE_WRITE)) {
 				/* Invalid delegation for this operation. */
 				LogDebug(COMPONENT_STATE,
 					"Delegation type:%d state:%d",
@@ -262,10 +317,6 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 				return res_WRITE4->status;
 			}
 
-			state_open = NULL;
-			break;
-
-		case STATE_TYPE_LAYOUT:
 			state_open = NULL;
 			break;
 
@@ -312,21 +363,20 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 	}
 
 	/* Need to permission check the write. */
-	fsal_status = obj->obj_ops.test_access(obj, FSAL_WRITE_ACCESS,
+	fsal_status = obj->obj_ops->test_access(obj, FSAL_WRITE_ACCESS,
 					       NULL, NULL, true);
 
 	if (FSAL_IS_ERROR(fsal_status)) {
 		res_WRITE4->status = nfs4_Errno_status(fsal_status);
-		goto done;
+		goto out;
 	}
 
 	/* Get the characteristics of the I/O to be made */
 	offset = arg_WRITE4->offset;
 	size = arg_WRITE4->data.data_len;
-	stable_how = arg_WRITE4->stable;
 	LogFullDebug(COMPONENT_NFS_V4,
 		     "offset = %" PRIu64 "  length = %" PRIu64 "  stable = %d",
-		     offset, size, stable_how);
+		     offset, size, arg_WRITE4->stable);
 
 	if (MaxOffsetWrite < UINT64_MAX) {
 		LogFullDebug(COMPONENT_NFS_V4,
@@ -341,7 +391,7 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 				 MaxOffsetWrite,
 				 op_ctx->ctx_export->export_id);
 			res_WRITE4->status = NFS4ERR_FBIG;
-			goto done;
+			goto out;
 		}
 	}
 
@@ -361,9 +411,6 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 		}
 	}
 
-	/* Where are the data ? */
-	bufferdata = arg_WRITE4->data.data_val;
-
 	LogFullDebug(COMPONENT_NFS_V4,
 		     "offset = %" PRIu64 " length = %" PRIu64,
 		     offset, size);
@@ -379,13 +426,9 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 					op_ctx->fsal_export, &verf_desc);
 
 		res_WRITE4->status = NFS4_OK;
-		goto done;
+		server_stats_io_done(0, 0, true, true);
+		goto out;
 	}
-
-	if (arg_WRITE4->stable == UNSTABLE4)
-		sync = false;
-	else
-		sync = true;
 
 	if (!anonymous_started && data->minorversion == 0) {
 		owner = get_state_owner_ref(state_found);
@@ -395,48 +438,27 @@ static int nfs4_write(struct nfs_argop4 *op, compound_data_t *data,
 		}
 	}
 
-	/* Call the new fsal_write */
-	fsal_status = fsal_write2(obj, false, state_found, offset, size,
-				  &written_size, bufferdata, &sync, info);
-
-	if (FSAL_IS_ERROR(fsal_status)) {
-		LogDebug(COMPONENT_NFS_V4, "write returned %s",
-			 fsal_err_txt(fsal_status));
-		res_WRITE4->status = nfs4_Errno_status(fsal_status);
-		goto done;
-	}
-
-	if (!anonymous_started && data->minorversion == 0)
-		op_ctx->clientid = NULL;
-
-	/* Set the returned value */
-	if (sync)
-		res_WRITE4->WRITE4res_u.resok4.committed = FILE_SYNC4;
+	/* Set up args */
+	write_arg->info = info;
+	write_arg->state = state_found;
+	write_arg->offset = offset;
+	write_arg->iov_count = 1;
+	write_arg->iov[0].iov_len = size;
+	write_arg->iov[0].iov_base = arg_WRITE4->data.data_val;
+	write_arg->io_amount = 0;
+	if (arg_WRITE4->stable == UNSTABLE4)
+		write_arg->fsal_stable = false;
 	else
-		res_WRITE4->WRITE4res_u.resok4.committed = UNSTABLE4;
+		write_arg->fsal_stable = true;
 
-	res_WRITE4->WRITE4res_u.resok4.count = written_size;
 
-	verf_desc.addr = res_WRITE4->WRITE4res_u.resok4.writeverf;
-	verf_desc.len = sizeof(verifier4);
-	op_ctx->fsal_export->exp_ops.get_write_verifier(op_ctx->fsal_export,
-							&verf_desc);
+	write_data.res_WRITE4 = res_WRITE4;
+	write_data.owner = owner;
 
-	res_WRITE4->status = NFS4_OK;
-
- done:
-
-	server_stats_io_done(size, written_size,
-			     (res_WRITE4->status == NFS4_OK) ? true : false,
-			     true);
+	/* Do the actual write */
+	obj->obj_ops->write2(obj, false, nfs4_write_cb, write_arg, &write_data);
 
  out:
-
-	if (owner != NULL)
-		dec_state_owner_ref(owner);
-
-	if (state_found != NULL)
-		dec_state_t_ref(state_found);
 
 	if (state_open != NULL)
 		dec_state_t_ref(state_open);
@@ -516,84 +538,4 @@ int nfs4_op_write_same(struct nfs_argop4 *op, compound_data_t *data,
 void nfs4_op_write_same_Free(nfs_resop4 *resp)
 {
 	/* Nothing to be done */
-}
-
-/**
- * @brief The NFS4_OP_ALLOCATE
- * This functions handles the NFS4_OP_ALLOCATE operation in NFSv4.2. This
- * function can be called only from nfs4_Compound.
- *
- * @param[in]     op    Arguments for nfs4_op
- * @param[in,out] data  Compound request's data
- * @param[out]    resp  Results for nfs4_op
- *
- */
-
-int nfs4_op_allocate(struct nfs_argop4 *op, compound_data_t *data,
-		  struct nfs_resop4 *resp)
-{
-	struct nfs_resop4 res;
-	struct nfs_argop4 arg;
-	struct io_info info;
-	/* Arguments and response */
-	ALLOCATE4args * const arg_ALLOC = &op->nfs_argop4_u.opallocate;
-	ALLOCATE4res * const res_ALLOC = &resp->nfs_resop4_u.opallocate;
-
-	resp->resop = NFS4_OP_ALLOCATE;
-	res_ALLOC->ar_status = NFS4_OK;
-
-	arg.nfs_argop4_u.opwrite.stateid = arg_ALLOC->aa_stateid;
-	arg.nfs_argop4_u.opwrite.stable = true;
-
-	info.io_content.what = NFS4_CONTENT_ALLOCATE;
-	info.io_content.hole.di_offset = arg_ALLOC->aa_offset;
-	info.io_content.hole.di_length = arg_ALLOC->aa_length;
-	arg.nfs_argop4_u.opwrite.offset = arg_ALLOC->aa_offset;
-	arg.nfs_argop4_u.opwrite.data.data_len = arg_ALLOC->aa_length;
-	arg.nfs_argop4_u.opwrite.data.data_val = NULL;
-	info.io_advise = 0;
-
-	res_ALLOC->ar_status = nfs4_write(&arg, data, &res,
-					   FSAL_IO_WRITE_PLUS, &info);
-	return res_ALLOC->ar_status;
-}
-
-/**
- * @brief The NFS4_OP_DEALLOCATE
- * This functions handles the NFS4_OP_DEALLOCATE operation in NFSv4.2. This
- * function can be called only from nfs4_Compound.
- *
- * @param[in]     op    Arguments for nfs4_op
- * @param[in,out] data  Compound request's data
- * @param[out]    resp  Results for nfs4_op
- *
- */
-
-int nfs4_op_deallocate(struct nfs_argop4 *op, compound_data_t *data,
-		  struct nfs_resop4 *resp)
-{
-	struct nfs_resop4 res;
-	struct nfs_argop4 arg;
-	struct io_info info;
-	/* Arguments and response */
-	DEALLOCATE4args * const arg_DEALLOC = &op->nfs_argop4_u.opdeallocate;
-	DEALLOCATE4res * const res_DEALLOC = &resp->nfs_resop4_u.opdeallocate;
-
-	resp->resop = NFS4_OP_DEALLOCATE;
-	res_DEALLOC->dr_status = NFS4_OK;
-
-	arg.nfs_argop4_u.opwrite.stateid = arg_DEALLOC->da_stateid;
-	arg.nfs_argop4_u.opwrite.stable = true;
-
-	info.io_content.what = NFS4_CONTENT_DEALLOCATE;
-	info.io_content.hole.di_offset = arg_DEALLOC->da_offset;
-	info.io_content.hole.di_length = arg_DEALLOC->da_length;
-	arg.nfs_argop4_u.opwrite.offset = arg_DEALLOC->da_offset;
-	arg.nfs_argop4_u.opwrite.data.data_len = arg_DEALLOC->da_length;
-	arg.nfs_argop4_u.opwrite.data.data_val = NULL;
-	info.io_advise = 0;
-
-	res_DEALLOC->dr_status = nfs4_write(&arg, data, &res,
-					   FSAL_IO_WRITE_PLUS, &info);
-	return res_DEALLOC->dr_status;
 }

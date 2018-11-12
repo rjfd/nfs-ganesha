@@ -12,16 +12,15 @@
 #include "fsal.h"
 #include "netdb.h"
 #include <rados/librados.h>
+#include <rados_grace.h>
 #include "recovery_rados.h"
-
-#define DEFAULT_POOL		"nfs-ganesha"
 
 #define MAX_ITEMS		1024		/* relaxed */
 
-rados_t rados_recov_cluster;
+static rados_t clnt;
 rados_ioctx_t rados_recov_io_ctx;
-char rados_recov_oid[NI_MAXHOST];
-static char rados_recov_old_oid[NI_MAXHOST];
+char rados_recov_oid[NI_MAXHOST + 6];
+char rados_recov_old_oid[NI_MAXHOST + 4];
 
 struct rados_kv_parameter rados_kv_param;
 
@@ -30,8 +29,14 @@ static struct config_item rados_kv_params[] = {
 		       rados_kv_parameter, ceph_conf),
 	CONF_ITEM_STR("userid", 1, MAXPATHLEN, NULL,
 		       rados_kv_parameter, userid),
-	CONF_ITEM_STR("pool", 1, MAXPATHLEN, DEFAULT_POOL,
+	CONF_ITEM_STR("pool", 1, MAXPATHLEN, DEFAULT_RADOS_GRACE_POOL,
 		       rados_kv_parameter, pool),
+	CONF_ITEM_STR("namespace", 1, NI_MAXHOST, NULL,
+			rados_kv_parameter, namespace),
+	CONF_ITEM_STR("grace_oid", 1, NI_MAXHOST, DEFAULT_RADOS_GRACE_OID,
+		       rados_kv_parameter, grace_oid),
+	CONF_ITEM_STR("nodeid", 1, NI_MAXHOST, NULL, rados_kv_parameter,
+			nodeid),
 	CONFIG_EOL
 };
 
@@ -128,11 +133,10 @@ void rados_kv_create_val(nfs_client_id_t *clientid, char *val)
 	snprintf(val, total_len, "%s-(%s:%s)",
 		 str_client_addr, cidstr_len, cidstr);
 
-	LogDebug(COMPONENT_CLIENTID, "Created client name [%s]",
-		 clientid->cid_recov_tag);
+	LogDebug(COMPONENT_CLIENTID, "Created client name [%s]", val);
 }
 
-static int rados_kv_put(char *key, char *val, char *object)
+int rados_kv_put(char *key, char *val, char *object)
 {
 	int ret;
 	char *keys[1];
@@ -221,7 +225,7 @@ static int rados_kv_del(char *key, char *object)
 	return ret;
 }
 
-int rados_kv_traverse(pop_clid_entry_t pop_func, pop_args_t pop_args,
+int rados_kv_traverse(pop_clid_entry_t callback, struct pop_args *args,
 			const char *object)
 {
 	int ret;
@@ -250,9 +254,7 @@ again:
 		if (val_len_out == 0 && key_out == NULL && val_out == NULL)
 			break;
 		start = key_out;
-		pop_func(key_out, val_out, pop_args->add_clid_entry,
-			 pop_args->add_rfh_entry, pop_args->old,
-			 pop_args->takeover);
+		callback(key_out, val_out, args);
 	}
 	rados_omap_get_end(iter_vals);
 
@@ -267,20 +269,20 @@ out:
 	return ret;
 }
 
-void rados_kv_append_val_rdfh(char *val, char *rdfh, int rdfh_len)
+static void rados_kv_append_val_rdfh(char *val, char *rdfh, int rdfh_len)
 {
 	char rdfhstr[NAME_MAX];
-	int rdfhstr_len;
 	int ret;
+	size_t buflen;
 
 	/* Convert nfs_fh4_val into base64 encoded string */
 	ret = base64url_encode(rdfh, rdfh_len, rdfhstr, NAME_MAX);
 	assert(ret != -1);
-	rdfhstr_len = strlen(rdfhstr);
 
-	strncat(val, "#", 1);
-	strncat(val, rdfhstr, rdfhstr_len);
-	val[rdfhstr_len + 1] = '\0';
+	buflen = RADOS_VAL_MAX_LEN - (strlen(val) + 1);
+	strncat(val, "#", buflen);
+	buflen--;
+	strncat(val, rdfhstr, buflen);
 }
 
 int rados_kv_set_param_from_conf(config_file_t parse_tree,
@@ -300,7 +302,61 @@ int rados_kv_set_param_from_conf(config_file_t parse_tree,
 	return 0;
 }
 
-void rados_kv_init(void)
+int rados_kv_connect(rados_ioctx_t *io_ctx, const char *userid,
+			const char *conf, const char *pool, const char *ns)
+{
+	int ret;
+
+	ret = rados_create(&clnt, userid);
+	if (ret < 0) {
+		LogEvent(COMPONENT_CLIENTID, "Failed to create: %d", ret);
+		return ret;
+	}
+
+	ret = rados_conf_read_file(clnt, conf);
+	if (ret < 0) {
+		LogEvent(COMPONENT_CLIENTID, "Failed to read conf: %d", ret);
+		rados_shutdown(clnt);
+		return ret;
+	}
+
+	ret = rados_connect(clnt);
+	if (ret < 0) {
+		LogEvent(COMPONENT_CLIENTID, "Failed to connect: %d", ret);
+		rados_shutdown(clnt);
+		return ret;
+	}
+
+	ret = rados_pool_create(clnt, pool);
+	if (ret < 0 && ret != -EEXIST) {
+		LogEvent(COMPONENT_CLIENTID, "Failed to create pool: %d", ret);
+		rados_shutdown(clnt);
+		return ret;
+	}
+
+	ret = rados_ioctx_create(clnt, pool, io_ctx);
+	if (ret < 0) {
+		LogEvent(COMPONENT_CLIENTID, "Failed to create ioctx");
+		rados_shutdown(clnt);
+	}
+
+	rados_ioctx_set_namespace(*io_ctx, ns);
+	return ret;
+}
+
+void rados_kv_shutdown(void)
+{
+	if (rados_recov_io_ctx) {
+		rados_ioctx_destroy(rados_recov_io_ctx);
+		rados_recov_io_ctx = NULL;
+	}
+	if (clnt) {
+		rados_shutdown(clnt);
+		clnt = NULL;
+	}
+}
+
+int rados_kv_init(void)
 {
 	int ret;
 	char host[NI_MAXHOST];
@@ -313,7 +369,7 @@ void rados_kv_init(void)
 			LogEvent(COMPONENT_CLIENTID,
 				 "Failed to gethostname: %s",
 				 strerror(errno));
-			return;
+			return -errno;
 		}
 	}
 
@@ -321,36 +377,13 @@ void rados_kv_init(void)
 		 "%s_old", host);
 	snprintf(rados_recov_oid, sizeof(rados_recov_oid), "%s_recov", host);
 
-	ret = rados_create(&rados_recov_cluster, rados_kv_param.userid);
+	ret = rados_kv_connect(&rados_recov_io_ctx, rados_kv_param.userid,
+			rados_kv_param.ceph_conf, rados_kv_param.pool,
+			rados_kv_param.namespace);
 	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to rados create");
-		return;
-	}
-	ret = rados_conf_read_file(rados_recov_cluster,
-				   rados_kv_param.ceph_conf);
-	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to read ceph_conf");
-		rados_shutdown(rados_recov_cluster);
-		return;
-	}
-	ret = rados_connect(rados_recov_cluster);
-	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to connect to cluster");
-		rados_shutdown(rados_recov_cluster);
-		return;
-	}
-	ret = rados_pool_create(rados_recov_cluster, rados_kv_param.pool);
-	if (ret < 0 && ret != -EEXIST) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to create pool");
-		rados_shutdown(rados_recov_cluster);
-		return;
-	}
-	ret = rados_ioctx_create(rados_recov_cluster, rados_kv_param.pool,
-				 &rados_recov_io_ctx);
-	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to create ioctx");
-		rados_shutdown(rados_recov_cluster);
-		return;
+		LogEvent(COMPONENT_CLIENTID,
+			"Failed to connect to cluster: %d", ret);
+		return ret;
 	}
 
 	rados_write_op_t op = rados_create_write_op();
@@ -361,8 +394,8 @@ void rados_kv_init(void)
 	if (ret < 0 && ret != -EEXIST) {
 		LogEvent(COMPONENT_CLIENTID, "Failed to create object");
 		rados_release_write_op(op);
-		rados_shutdown(rados_recov_cluster);
-		return;
+		rados_kv_shutdown();
+		return ret;
 	}
 	rados_release_write_op(op);
 
@@ -373,12 +406,13 @@ void rados_kv_init(void)
 	if (ret < 0 && ret != -EEXIST) {
 		LogEvent(COMPONENT_CLIENTID, "Failed to create object");
 		rados_release_write_op(op);
-		rados_shutdown(rados_recov_cluster);
-		return;
+		rados_kv_shutdown();
+		return ret;
 	}
 	rados_release_write_op(op);
 
 	LogEvent(COMPONENT_CLIENTID, "Rados kv store init done");
+	return 0;
 }
 
 void rados_kv_add_clid(nfs_client_id_t *clientid)
@@ -423,17 +457,16 @@ void rados_kv_rm_clid(nfs_client_id_t *clientid)
 	clientid->cid_recov_tag = NULL;
 }
 
-static void rados_kv_pop_clid_entry(char *key,
-				    char *val,
-				    add_clid_entry_hook add_clid_entry,
-				    add_rfh_entry_hook add_rfh_entry,
-				    bool old,
-				    bool takeover)
+void rados_kv_pop_clid_entry(char *key, char *val, struct pop_args *pop_args)
 {
 	int ret;
 	char *dupval;
 	char *cl_name, *rfh_names, *rfh_name;
 	clid_entry_t *clid_ent;
+	add_clid_entry_hook add_clid_entry = pop_args->add_clid_entry;
+	add_rfh_entry_hook add_rfh_entry = pop_args->add_rfh_entry;
+	bool old = pop_args->old;
+	bool takeover = pop_args->takeover;
 
 	/* extract clid records */
 	dupval = gsh_strdup(val);
@@ -574,7 +607,8 @@ out:
 
 struct nfs4_recovery_backend rados_kv_backend = {
 	.recovery_init = rados_kv_init,
-	.recovery_cleanup = rados_kv_cleanup_old,
+	.recovery_shutdown = rados_kv_shutdown,
+	.end_grace = rados_kv_cleanup_old,
 	.recovery_read_clids = rados_kv_read_recov_clids_takeover,
 	.add_clid = rados_kv_add_clid,
 	.rm_clid = rados_kv_rm_clid,

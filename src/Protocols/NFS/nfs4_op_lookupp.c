@@ -85,14 +85,13 @@ int nfs4_op_lookupp(struct nfs_argop4 *op, compound_data_t *data,
 	if (data->current_obj->type != DIRECTORY)
 		goto not_junction;
 
-	PTHREAD_RWLOCK_rdlock(&original_export->lock);
-
 	status = nfs_export_get_root_entry(original_export, &root_obj);
 	if (FSAL_IS_ERROR(status)) {
 		res_LOOKUPP4->status = nfs4_Errno_status(status);
-		PTHREAD_RWLOCK_unlock(&original_export->lock);
 		return res_LOOKUPP4->status;
 	}
+
+	PTHREAD_RWLOCK_rdlock(&original_export->lock);
 
 	if (data->current_obj == root_obj) {
 		struct gsh_export *parent_exp = NULL;
@@ -108,7 +107,7 @@ int nfs4_op_lookupp(struct nfs_argop4 *op, compound_data_t *data,
 			/* lookupp on the root on the pseudofs should return
 			 * NFS4ERR_NOENT (RFC3530, page 166)
 			 */
-			root_obj->obj_ops.put_ref(root_obj);
+			root_obj->obj_ops->put_ref(root_obj);
 			PTHREAD_RWLOCK_unlock(&original_export->lock);
 			res_LOOKUPP4->status = NFS4ERR_NOENT;
 			return res_LOOKUPP4->status;
@@ -142,7 +141,7 @@ int nfs4_op_lookupp(struct nfs_argop4 *op, compound_data_t *data,
 		if (dir_obj == NULL || parent_exp == NULL ||
 		    !export_ready(parent_exp)) {
 			/* Export is in the process of dying */
-			root_obj->obj_ops.put_ref(root_obj);
+			root_obj->obj_ops->put_ref(root_obj);
 			PTHREAD_RWLOCK_unlock(&original_export->lock);
 			LogCrit(COMPONENT_EXPORT,
 				"Reverse junction from Export_Id %d Pseudo %s Parent=%p is stale",
@@ -155,7 +154,7 @@ int nfs4_op_lookupp(struct nfs_argop4 *op, compound_data_t *data,
 
 		get_gsh_export_ref(parent_exp);
 
-		dir_obj->obj_ops.get_ref(dir_obj);
+		dir_obj->obj_ops->get_ref(dir_obj);
 
 		/* Set up dir_obj as current obj with an LRU reference
 		 * while still holding the lock.
@@ -163,7 +162,7 @@ int nfs4_op_lookupp(struct nfs_argop4 *op, compound_data_t *data,
 		set_current_entry(data, dir_obj);
 
 		/* Put our ref */
-		dir_obj->obj_ops.put_ref(dir_obj);
+		dir_obj->obj_ops->put_ref(dir_obj);
 
 		/* Stash parent export in opctx while still holding the lock.
 		 */
@@ -187,7 +186,7 @@ int nfs4_op_lookupp(struct nfs_argop4 *op, compound_data_t *data,
 			 * have access to this export, return NFS4ERR_NOENT to
 			 * hide it. It was not visible in READDIR response.
 			 */
-			root_obj->obj_ops.put_ref(root_obj);
+			root_obj->obj_ops->put_ref(root_obj);
 			LogDebug(COMPONENT_EXPORT,
 				 "NFS4ERR_ACCESS Hiding Export_Id %d Pseudo %s with NFS4ERR_NOENT",
 				 parent_exp->export_id,
@@ -201,7 +200,7 @@ int nfs4_op_lookupp(struct nfs_argop4 *op, compound_data_t *data,
 	}
 
 	/* Return our ref from above */
-	root_obj->obj_ops.put_ref(root_obj);
+	root_obj->obj_ops->put_ref(root_obj);
 
 not_junction:
 
@@ -213,7 +212,7 @@ not_junction:
 						file_obj,
 						op_ctx->ctx_export)) {
 			res_LOOKUPP4->status = NFS4ERR_SERVERFAULT;
-			file_obj->obj_ops.put_ref(file_obj);
+			file_obj->obj_ops->put_ref(file_obj);
 			return res_LOOKUPP4->status;
 		}
 
@@ -221,7 +220,7 @@ not_junction:
 		set_current_entry(data, file_obj);
 
 		/* Put our ref */
-		file_obj->obj_ops.put_ref(file_obj);
+		file_obj->obj_ops->put_ref(file_obj);
 
 		/* Return successfully */
 		res_LOOKUPP4->status = NFS4_OK;

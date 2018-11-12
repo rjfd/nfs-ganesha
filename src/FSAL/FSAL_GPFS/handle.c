@@ -42,6 +42,7 @@
 #include "fsal_convert.h"
 #include "FSAL/fsal_commonlib.h"
 #include "gpfs_methods.h"
+#include "nfs_proto_tools.h"
 
 
 /* alloc_handle
@@ -82,11 +83,25 @@ struct gpfs_fsal_obj_handle *alloc_handle(struct gpfs_file_handle *fh,
 	fsal_obj_handle_init(&hdl->obj_handle, exp_hdl, attributes->type);
 	hdl->obj_handle.fsid = attributes->fsid;
 	hdl->obj_handle.fileid = attributes->fileid;
-	gpfs_handle_ops_init(&hdl->obj_handle.obj_ops);
+
 	if (myself->pnfs_mds_enabled)
-		handle_ops_pnfs(&hdl->obj_handle.obj_ops);
+		hdl->obj_handle.obj_ops = &GPFS.handle_ops_with_pnfs;
+	else
+		hdl->obj_handle.obj_ops = &GPFS.handle_ops;
 
 	return hdl;
+}
+
+uint64_t get_handle2inode(struct gpfs_file_handle *gfh)
+{
+	struct f_handle {
+		char unused1[8];
+		uint64_t inode;  /* inode for file */
+		char unused2[8];
+		uint64_t pinode; /* inode for parent */
+	} *f_handle = (struct f_handle *)gfh->f_handle;
+
+	return f_handle->inode;
 }
 
 /* lookup
@@ -110,7 +125,7 @@ static fsal_status_t lookup(struct fsal_obj_handle *parent,
 		return fsalstat(ERR_FSAL_FAULT, 0);
 	memset(fh, 0, sizeof(struct gpfs_file_handle));
 	fh->handle_size = GPFS_MAX_FH_SIZE;
-	if (!parent->obj_ops.handle_is(parent, DIRECTORY)) {
+	if (!fsal_obj_handle_is(parent, DIRECTORY)) {
 		LogCrit(COMPONENT_FSAL,
 			"Parent handle is not a directory. hdl = 0x%p", parent);
 		return fsalstat(ERR_FSAL_NOTDIR, 0);
@@ -164,7 +179,7 @@ static fsal_status_t makedir(struct fsal_obj_handle *dir_hdl,
 	struct attrlist attrib;
 
 	*handle = NULL;		/* poison it */
-	if (!dir_hdl->obj_ops.handle_is(dir_hdl, DIRECTORY)) {
+	if (!fsal_obj_handle_is(dir_hdl, DIRECTORY)) {
 		LogCrit(COMPONENT_FSAL,
 			"Parent handle is not a directory. hdl = 0x%p",
 			dir_hdl);
@@ -202,14 +217,14 @@ static fsal_status_t makedir(struct fsal_obj_handle *dir_hdl,
 		/* Now per support_ex API, if there are any other attributes
 		 * set, go ahead and get them set now.
 		 */
-		status = (*handle)->obj_ops.setattr2(*handle, false, NULL,
+		status = (*handle)->obj_ops->setattr2(*handle, false, NULL,
 						     attr_in);
 		if (FSAL_IS_ERROR(status)) {
 			/* Release the handle we just allocated. */
 			LogFullDebug(COMPONENT_FSAL,
 				     "setattr2 status=%s",
 				     fsal_err_txt(status));
-			(*handle)->obj_ops.release(*handle);
+			(*handle)->obj_ops->release(*handle);
 			*handle = NULL;
 		}
 	} else {
@@ -233,7 +248,7 @@ static fsal_status_t makenode(struct fsal_obj_handle *dir_hdl,
 	struct attrlist attrib;
 
 	*handle = NULL;		/* poison it */
-	if (!dir_hdl->obj_ops.handle_is(dir_hdl, DIRECTORY)) {
+	if (!fsal_obj_handle_is(dir_hdl, DIRECTORY)) {
 		LogCrit(COMPONENT_FSAL,
 			"Parent handle is not a directory. hdl = 0x%p",
 			dir_hdl);
@@ -273,14 +288,14 @@ static fsal_status_t makenode(struct fsal_obj_handle *dir_hdl,
 		/* Now per support_ex API, if there are any other attributes
 		 * set, go ahead and get them set now.
 		 */
-		status = (*handle)->obj_ops.setattr2(*handle, false, NULL,
+		status = (*handle)->obj_ops->setattr2(*handle, false, NULL,
 						     attr_in);
 		if (FSAL_IS_ERROR(status)) {
 			/* Release the handle we just allocated. */
 			LogFullDebug(COMPONENT_FSAL,
 				     "setattr2 status=%s",
 				     fsal_err_txt(status));
-			(*handle)->obj_ops.release(*handle);
+			(*handle)->obj_ops->release(*handle);
 			*handle = NULL;
 		}
 	} else {
@@ -309,7 +324,7 @@ static fsal_status_t makesymlink(struct fsal_obj_handle *dir_hdl,
 	struct attrlist attrib;
 
 	*handle = NULL;		/* poison it first */
-	if (!dir_hdl->obj_ops.handle_is(dir_hdl, DIRECTORY)) {
+	if (!fsal_obj_handle_is(dir_hdl, DIRECTORY)) {
 		LogCrit(COMPONENT_FSAL,
 			"Parent handle is not a directory. hdl = 0x%p",
 			dir_hdl);
@@ -348,14 +363,14 @@ static fsal_status_t makesymlink(struct fsal_obj_handle *dir_hdl,
 		/* Now per support_ex API, if there are any other attributes
 		 * set, go ahead and get them set now.
 		 */
-		status = (*handle)->obj_ops.setattr2(*handle, false, NULL,
+		status = (*handle)->obj_ops->setattr2(*handle, false, NULL,
 						     attr_in);
 		if (FSAL_IS_ERROR(status)) {
 			/* Release the handle we just allocated. */
 			LogFullDebug(COMPONENT_FSAL,
 				     "setattr2 status=%s",
 				      fsal_err_txt(status));
-			(*handle)->obj_ops.release(*handle);
+			(*handle)->obj_ops->release(*handle);
 			*handle = NULL;
 		}
 	} else {
@@ -509,7 +524,7 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 
 	*eof = true;
  done:
-	close(dirfd);
+	fsal_internal_close(dirfd, NULL, 0);
 
 	return fsalstat(fsal_error, retval);
 }
@@ -539,14 +554,34 @@ static fsal_status_t getattrs(struct fsal_obj_handle *obj_hdl,
 			      struct attrlist *attrs)
 {
 	struct gpfs_fsal_obj_handle *myself;
+	fsal_status_t status = {ERR_FSAL_NO_ERROR, 0};
 
 	myself = container_of(obj_hdl, struct gpfs_fsal_obj_handle,
 			      obj_handle);
 
-	return GPFSFSAL_getattrs(op_ctx->fsal_export,
+	status = GPFSFSAL_getattrs(op_ctx->fsal_export,
+				   obj_hdl->fs->private_data,
+				   op_ctx, myself->handle,
+				   attrs);
+	if (FSAL_IS_ERROR(status)) {
+		goto out;
+	}
+
+	if (!FSAL_TEST_MASK(attrs->request_mask, ATTR4_FS_LOCATIONS)) {
+		goto out;
+	}
+
+	status = GPFSFSAL_fs_loc(op_ctx->fsal_export,
 				 obj_hdl->fs->private_data,
 				 op_ctx, myself->handle,
 				 attrs);
+
+	if (FSAL_IS_SUCCESS(status)) {
+		FSAL_SET_MASK(attrs->valid_mask, ATTR4_FS_LOCATIONS);
+	}
+
+out:
+	return status;
 }
 
 static fsal_status_t getxattrs(struct fsal_obj_handle *obj_hdl,
@@ -883,8 +918,7 @@ static void release(struct fsal_obj_handle *obj_hdl)
 	if (type == REGULAR_FILE) {
 		PTHREAD_RWLOCK_wrlock(&obj_hdl->obj_lock);
 
-		if (myself->u.file.fd.fd >= 0 &&
-		    myself->u.file.fd.openflags != FSAL_O_CLOSED) {
+		if (myself->u.file.fd.openflags != FSAL_O_CLOSED) {
 			fsal_internal_close(myself->u.file.fd.fd, NULL, 0);
 			myself->u.file.fd.fd = -1;
 			myself->u.file.fd.openflags = FSAL_O_CLOSED;
@@ -901,31 +935,14 @@ static void release(struct fsal_obj_handle *obj_hdl)
 	gsh_free(myself);
 }
 
-/* gpfs_fs_locations
- */
-static fsal_status_t gpfs_fs_locations(struct fsal_obj_handle *obj_hdl,
-					struct fs_locations4 *fs_locs)
-{
-	struct gpfs_fsal_obj_handle *myself;
-	fsal_status_t status;
-
-	myself = container_of(obj_hdl, struct gpfs_fsal_obj_handle,
-			      obj_handle);
-
-	status = GPFSFSAL_fs_loc(op_ctx->fsal_export,
-				obj_hdl->fs->private_data,
-				op_ctx, myself->handle,
-				fs_locs);
-
-	return status;
-}
-
 /**
  *
  *  @param ops Object operations
-*/
+ */
 void gpfs_handle_ops_init(struct fsal_obj_ops *ops)
 {
+	fsal_default_obj_ops_init(ops);
+
 	ops->release = release;
 	ops->lookup = lookup;
 	ops->readdir = read_dirents;
@@ -937,7 +954,6 @@ void gpfs_handle_ops_init(struct fsal_obj_ops *ops)
 	ops->link = linkfile;
 	ops->rename = renamefile;
 	ops->unlink = file_unlink;
-	ops->fs_locations = gpfs_fs_locations;
 	ops->seek = gpfs_seek;
 	ops->io_advise = gpfs_io_advise;
 	ops->close = gpfs_close;
@@ -957,6 +973,8 @@ void gpfs_handle_ops_init(struct fsal_obj_ops *ops)
 	ops->close2 = gpfs_close2;
 	ops->lock_op2 = gpfs_lock_op2;
 	ops->merge = gpfs_merge;
+	ops->is_referral = fsal_common_is_referral;
+	ops->fallocate = gpfs_fallocate;
 }
 
 /**

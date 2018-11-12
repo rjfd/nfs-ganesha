@@ -31,6 +31,9 @@ MNT_Port (uint16, range 0 to UINT16_MAX, default 0)
 NLM_Port (uint16, range 0 to UINT16_MAX, default 0)
     Port number used by NLM Protocol.
 
+Rquota_Port (uint16, range 0 to UINT16_MAX, default 875)
+    Port number used by Rquota Protocol.
+
 Bind_addr(IPv4 or IPv6 addr, default 0.0.0.0)
     The address to which to bind for our listening port.
 
@@ -288,10 +291,12 @@ pnfs_ds(bool, default false)
 
 RecoveryBackend(path, default "fs")
     Use different backend for client info:
+
     - fs : filesystem
     - fs_ng: filesystem (better resiliency)
     - rados_kv : rados key-value
     - rados_ng : rados key-value (better resiliency)
+    - rados_cluster: clustered rados backend (active/active)
 
 Minor_Versions(enum list, values [0, 1, 2], default [0, 1, 2])
     List of supported NFSV4 minor version numbers.
@@ -308,5 +313,14 @@ ceph_conf(string, no default)
 userid(path, no default)
     User ID to ceph cluster.
 
-pool(string, default nfs-ganesha)
+namespace(string, default NULL)
+    RADOS Namespace in which to store objects
+
+pool(string, default "nfs-ganesha")
     Pool for client info.
+
+grace_oid(string, default "grace")
+    Name of the object containing the rados_cluster grace DB
+
+nodeid(string, default result of gethostname())
+    Unique node identifier within rados_cluster

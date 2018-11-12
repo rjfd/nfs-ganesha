@@ -56,6 +56,7 @@
 #include "pnfs_utils.h"
 #include "nfs_creds.h"
 #include "sal_data.h"
+#include "FSAL/fsal_config.h"
 
 /** fsal module method defaults and common methods
  */
@@ -269,6 +270,16 @@ static const char *get_name(struct fsal_export *exp_hdl)
 	return exp_hdl->fsal->name;
 }
 
+/* export_prepare_unexport
+ * Nothing to do in the default case
+ */
+
+static void export_prepare_unexport(struct fsal_export *exp_hdl)
+{
+	/* return */
+}
+
+
 /* export_unexport
  * Nothing to do in the default case
  */
@@ -360,115 +371,141 @@ static fsal_status_t get_dynamic_info(struct fsal_export *exp_hdl,
 	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
 }
 
-/* fs_supports
- * default case is supports nothing
+/**
+ * @brief Query the FSAL's capabilities
+ *
+ * This function queries the capabilities of an FSAL export.
+ *
+ * @param[in] exp_hdl The public export handle
+ * @param[in] option     The option to check
+ *
+ * @retval true if the option is supported.
+ * @retval false if the option is unsupported (or unknown).
  */
-
 static bool fs_supports(struct fsal_export *exp_hdl,
 			fsal_fsinfo_options_t option)
 {
-	return false;
+	return fsal_supports(&exp_hdl->fsal->fs_info, option);
 }
 
-/* fs_maxfilesize
- * default case is zero size
+/**
+ * @brief Return the longest file supported
+ *
+ * This function returns the length of the longest file supported.
+ *
+ * @param[in] exp_hdl The public export
+ *
  */
-
 static uint64_t fs_maxfilesize(struct fsal_export *exp_hdl)
 {
-	return 0;
+	return fsal_maxfilesize(&exp_hdl->fsal->fs_info);
 }
 
-/* fs_maxread
- * default case is zero length
+/**
+ * @brief Return the longest read supported
+ *
+ * This function returns the length of the longest read supported.
+ *
+ * @param[in] exp_hdl The public export
+ *
  */
-
 static uint32_t fs_maxread(struct fsal_export *exp_hdl)
 {
-	return 0;
+	return fsal_maxread(&exp_hdl->fsal->fs_info);
 }
 
-/* fs_maxwrite
- * default case is zero length
+/**
+ * @brief Return the longest write supported
+ *
+ * This function returns the length of the longest write supported.
+ *
+ * @param[in] exp_hdl The public export
+ *
  */
-
 static uint32_t fs_maxwrite(struct fsal_export *exp_hdl)
 {
-	return 0;
+	return fsal_maxwrite(&exp_hdl->fsal->fs_info);
 }
 
-/* fs_maxlink
- * default case is zero links
+/**
+ * @brief Return the maximum number of hard links to a file
+ *
+ * This function returns the maximum number of hard links supported to
+ * any file.
+ *
+ * @param[in] exp_hdl The public export
+ *
  */
-
 static uint32_t fs_maxlink(struct fsal_export *exp_hdl)
 {
-	return 0;
+	return fsal_maxlink(&exp_hdl->fsal->fs_info);
 }
 
-/* fs_maxnamelen
- * default case is zero length
+/**
+ * @brief Return the maximum size of a Ceph filename
+ *
+ * This function returns the maximum filename length.
+ *
+ * @param[in] exp_hdl The public export
+ *
  */
-
 static uint32_t fs_maxnamelen(struct fsal_export *exp_hdl)
 {
-	return 0;
+	return fsal_maxnamelen(&exp_hdl->fsal->fs_info);
 }
 
-/* fs_maxpathlen
- * default case is zero length
- */
 
+/**
+ * @brief Return the maximum length of a Ceph path
+ *
+ * This function returns the maximum path length.
+ *
+ * @param[in] exp_hdl The public export
+ *
+ */
 static uint32_t fs_maxpathlen(struct fsal_export *exp_hdl)
 {
-	return 0;
+	return fsal_maxpathlen(&exp_hdl->fsal->fs_info);
 }
 
-/* fs_lease_time
- * default case is zero interval time
+/**
+ * @brief Return ACL support
+ *
+ * This function returns the export's ACL support.
+ *
+ * @param[in] export_pub The public export
+ *
  */
-
-static struct timespec fs_lease_time(struct fsal_export *exp_hdl)
-{
-	struct timespec lease_time = { 0, 0 };
-
-	return lease_time;
-}
-
-/* fs_acl_support
- * default case is none, neither deny or allow
- */
-
 static fsal_aclsupp_t fs_acl_support(struct fsal_export *exp_hdl)
 {
-	return 0;
+	return fsal_acl_support(&exp_hdl->fsal->fs_info);
 }
 
-/* fs_supported_attrs
- * default case is none
+/**
+ * @brief Return the attributes supported by this FSAL
+ *
+ * This function returns the mask of attributes this FSAL can support.
+ *
+ * @param[in] exp_hdl The public export
+ *
  */
-
 static attrmask_t fs_supported_attrs(struct fsal_export *exp_hdl)
 {
-	return 0;
+	return fsal_supported_attrs(&exp_hdl->fsal->fs_info);
 }
 
-/* fs_umask
- * default case is no access
+/**
+ * @brief Return the mode under which the FSAL will create files
+ *
+ * This function modifies the default mode on any new file created.
+ *
+ * @param[in] export_pub The public export
+ *
+ * @return 0 (usually).  Bits set here turn off bits in created files.
  */
-
 static uint32_t fs_umask(struct fsal_export *exp_hdl)
 {
-	return 0000;
-}
-
-/* fs_xattr_access_rights
- * default case is no access
- */
-
-static uint32_t fs_xattr_access_rights(struct fsal_export *exp_hdl)
-{
-	return 0000;
+	return fsal_umask(&exp_hdl->fsal->fs_info);
 }
 
 /* check_quota
@@ -629,6 +666,7 @@ bool is_superuser(struct fsal_export *exp_hdl, const struct user_cred *creds)
 
 struct export_ops def_export_ops = {
 	.get_name = get_name,
+	.prepare_unexport = export_prepare_unexport,
 	.unexport = export_unexport,
 	.release = export_release,
 	.lookup_path = lookup_path,
@@ -644,11 +682,9 @@ struct export_ops def_export_ops = {
 	.fs_maxlink = fs_maxlink,
 	.fs_maxnamelen = fs_maxnamelen,
 	.fs_maxpathlen = fs_maxpathlen,
-	.fs_lease_time = fs_lease_time,
 	.fs_acl_support = fs_acl_support,
 	.fs_supported_attrs = fs_supported_attrs,
 	.fs_umask = fs_umask,
-	.fs_xattr_access_rights = fs_xattr_access_rights,
 	.check_quota = check_quota,
 	.get_quota = get_quota,
 	.set_quota = set_quota,
@@ -666,15 +702,6 @@ struct export_ops def_export_ops = {
 /* fsal_obj_handle common methods
  */
 
-/* handle_is
- * test the type of this handle
- */
-
-static bool handle_is(struct fsal_obj_handle *obj_hdl, object_file_type_t type)
-{
-	return obj_hdl->type == type;
-}
-
 /* get_ref
  * This MUST be handled by someone. For many FSALs, it is handled by
  * FSAL_MDCACHE.
@@ -682,8 +709,7 @@ static bool handle_is(struct fsal_obj_handle *obj_hdl, object_file_type_t type)
 
 static void handle_get_ref(struct fsal_obj_handle *obj_hdl)
 {
-	LogFatal(COMPONENT_FSAL,
-		 "FSAL Must support get_ref");
+	/* return */
 }
 
 /* put_ref
@@ -693,8 +719,7 @@ static void handle_get_ref(struct fsal_obj_handle *obj_hdl)
 
 static void handle_put_ref(struct fsal_obj_handle *obj_hdl)
 {
-	LogFatal(COMPONENT_FSAL,
-		 "FSAL Must support put_ref");
+	/* return */
 }
 
 /* handle_release
@@ -946,16 +971,6 @@ static fsal_status_t file_unlink(struct fsal_obj_handle *dir_hdl,
 	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
 }
 
-/* fs_locations
- * default case not supported
- */
-
-static fsal_status_t fs_locations(struct fsal_obj_handle *obj_hdl,
-				 struct fs_locations4 *fs_locs)
-{
-	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
-}
-
 /* seek
  * default case not supported
  */
@@ -985,6 +1000,19 @@ static fsal_status_t file_io_advise(struct fsal_obj_handle *obj_hdl,
  */
 
 static fsal_status_t file_close(struct fsal_obj_handle *obj_hdl)
+{
+	LogCrit(COMPONENT_FSAL,
+		"Invoking unsupported FSAL operation");
+	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
+}
+
+/* fallocate
+ * default case not supported
+ */
+
+static fsal_status_t file_fallocate(struct fsal_obj_handle *obj_hdl,
+				    struct state_t *state, uint64_t offset,
+				    uint64_t length, bool allocate)
 {
 	LogCrit(COMPONENT_FSAL,
 		"Invoking unsupported FSAL operation");
@@ -1026,7 +1054,7 @@ static fsal_status_t getextattr_id_by_name(struct fsal_obj_handle *obj_hdl,
 
 static fsal_status_t getextattr_value_by_name(struct fsal_obj_handle *obj_hdl,
 					      const char *xattr_name,
-					      caddr_t buffer_addr,
+					      void *buffer_addr,
 					      size_t buffer_size,
 					      size_t *p_output_size)
 {
@@ -1041,7 +1069,7 @@ static fsal_status_t getextattr_value_by_name(struct fsal_obj_handle *obj_hdl,
 
 static fsal_status_t getextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					    unsigned int xattr_id,
-					    caddr_t buffer_addr,
+					    void *buffer_addr,
 					    size_t buffer_size,
 					    size_t *p_output_size)
 {
@@ -1056,7 +1084,7 @@ static fsal_status_t getextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 
 static fsal_status_t setextattr_value(struct fsal_obj_handle *obj_hdl,
 				      const char *xattr_name,
-				      caddr_t buffer_addr, size_t buffer_size,
+				      void *buffer_addr, size_t buffer_size,
 				      int create)
 {
 	LogCrit(COMPONENT_FSAL,
@@ -1070,7 +1098,7 @@ static fsal_status_t setextattr_value(struct fsal_obj_handle *obj_hdl,
 
 static fsal_status_t setextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					    unsigned int xattr_id,
-					    caddr_t buffer_addr,
+					    void *buffer_addr,
 					    size_t buffer_size)
 {
 	LogCrit(COMPONENT_FSAL,
@@ -1128,8 +1156,8 @@ static bool handle_cmp(struct fsal_obj_handle *obj_hdl1,
 	if (obj_hdl1 == obj_hdl2)
 		return true;
 
-	obj_hdl1->obj_ops.handle_to_key(obj_hdl1, &key1);
-	obj_hdl2->obj_ops.handle_to_key(obj_hdl2, &key2);
+	obj_hdl1->obj_ops->handle_to_key(obj_hdl1, &key1);
+	obj_hdl2->obj_ops->handle_to_key(obj_hdl2, &key2);
 	if (key1.len != key2.len)
 		return false;
 	return !memcmp(key1.addr, key2.addr, key1.len);
@@ -1250,7 +1278,7 @@ static bool check_verifier(struct fsal_obj_handle *obj_hdl,
 
 	fsal_prepare_attrs(&attrs, ATTR_ATIME | ATTR_MTIME);
 
-	if (FSAL_IS_ERROR(obj_hdl->obj_ops.getattrs(obj_hdl, &attrs)))
+	if (FSAL_IS_ERROR(obj_hdl->obj_ops->getattrs(obj_hdl, &attrs)))
 		return false;
 
 	result = check_verifier_attrlist(&attrs, verifier);
@@ -1290,37 +1318,32 @@ static fsal_status_t reopen2(struct fsal_obj_handle *obj_hdl,
  * default case not supported
  */
 
-static fsal_status_t read2(struct fsal_obj_handle *obj_hdl,
-			   bool bypass,
-			   struct state_t *state,
-			   uint64_t seek_descriptor,
-			   size_t buffer_size,
-			   void *buffer, size_t *read_amount,
-			   bool *end_of_file,
-			   struct io_info *info)
+static void read2(struct fsal_obj_handle *obj_hdl,
+		  bool bypass,
+		  fsal_async_cb done_cb,
+		  struct fsal_io_arg *read_arg,
+		  void *caller_arg)
 {
 	LogCrit(COMPONENT_FSAL,
 		"Invoking unsupported FSAL operation");
-	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
+	done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP), read_arg,
+		caller_arg);
 }
 
 /* write2
  * default case not supported
  */
 
-static fsal_status_t write2(struct fsal_obj_handle *obj_hdl,
-			    bool bypass,
-			    struct state_t *state,
-			    uint64_t seek_descriptor,
-			    size_t buffer_size,
-			    void *buffer,
-			    size_t *write_amount,
-			    bool *fsal_stable,
-			    struct io_info *info)
+static void write2(struct fsal_obj_handle *obj_hdl,
+		   bool bypass,
+		   fsal_async_cb done_cb,
+		   struct fsal_io_arg *write_arg,
+		   void *caller_arg)
 {
 	LogCrit(COMPONENT_FSAL,
 		"Invoking unsupported FSAL operation");
-	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
+	done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP), write_arg,
+		caller_arg);
 }
 
 /* seek2
@@ -1418,6 +1441,16 @@ static fsal_status_t close2(struct fsal_obj_handle *obj_hdl,
 	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
 }
 
+/* is_referral
+ * default case not a referral
+ */
+static bool is_referral(struct fsal_obj_handle *obj_hdl,
+			struct attrlist *attrs,
+			bool cache_attrs)
+{
+	return false;
+}
+
 /* Default fsal handle object method vector.
  * copied to allocated vector at register time
  */
@@ -1440,9 +1473,9 @@ struct fsal_obj_ops def_handle_ops = {
 	.link = linkfile,
 	.rename = renamefile,
 	.unlink = file_unlink,
-	.fs_locations = fs_locations,
 	.seek = file_seek,
 	.io_advise = file_io_advise,
+	.fallocate = file_fallocate,
 	.close = file_close,
 	.list_ext_attrs = list_ext_attrs,
 	.getextattr_id_by_name = getextattr_id_by_name,
@@ -1452,7 +1485,6 @@ struct fsal_obj_ops def_handle_ops = {
 	.setextattr_value_by_id = setextattr_value_by_id,
 	.remove_extattr_by_id = remove_extattr_by_id,
 	.remove_extattr_by_name = remove_extattr_by_name,
-	.handle_is = handle_is,
 	.handle_to_wire = handle_to_wire,
 	.handle_cmp = handle_cmp,
 	.handle_to_key = handle_to_key,
@@ -1476,6 +1508,7 @@ struct fsal_obj_ops def_handle_ops = {
 	.lease_op2 = lease_op2,
 	.setattr2 = setattr2,
 	.close2 = close2,
+	.is_referral = is_referral,
 };
 
 /* fsal_pnfs_ds common methods */

@@ -38,6 +38,7 @@
 #include "fsal_convert.h"
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/uio.h>
 #include "vfs_methods.h"
 #include "os/subr.h"
 #include "sal_data.h"
@@ -281,6 +282,9 @@ static fsal_status_t fetch_attrs(struct vfs_fsal_obj_handle *myself,
 	int retval = 0;
 	fsal_status_t status = {0, 0};
 	const char *func = "unknown";
+#ifdef __FreeBSD__
+	struct fhandle *handle;
+#endif
 
 	/* Now stat the file as appropriate */
 	switch (myself->obj_handle.type) {
@@ -298,6 +302,12 @@ static fsal_status_t fetch_attrs(struct vfs_fsal_obj_handle *myself,
 		break;
 
 	case SYMBOLIC_LINK:
+#ifdef __FreeBSD__
+		handle = v_to_fhandle(myself->handle->handle_data);
+		retval = fhstat(handle, &stat);
+		func = "fhstat";
+		break;
+#endif
 	case FIFO_FILE:
 	case DIRECTORY:
 		retval = vfs_stat_by_handle(my_fd, &stat);
@@ -421,6 +431,28 @@ static fsal_status_t vfs_open2_by_handle(struct fsal_obj_handle *obj_hdl,
 	status = vfs_open_my_fd(myself, openflags, posix_flags, my_fd);
 
 	if (FSAL_IS_ERROR(status)) {
+		if (state == NULL) {
+			/* Release the lock taken above, and return
+			 * since there is nothing to undo.
+			 */
+			PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+			return status;
+		} else {
+			/* Error - need to release the share */
+			goto undo_share;
+		}
+	}
+
+	/* Check HSM status */
+	status = check_hsm_by_fd(my_fd->fd);
+	if (FSAL_IS_ERROR(status)) {
+		if (status.major == ERR_FSAL_DELAY) {
+			LogInfo(COMPONENT_FSAL,
+				"HSM restore at open for fd=%d", my_fd->fd);
+		}
+
+		 /*close fd*/
+		(void) vfs_close_my_fd(my_fd);
 		if (state == NULL) {
 			/* Release the lock taken above, and return
 			 * since there is nothing to undo.
@@ -630,7 +662,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 
 		access_type = FSAL_MODE_MASK_SET(FSAL_W_OK) |
 			FSAL_ACE4_MASK_SET(FSAL_ACE_PERM_ADD_FILE);
-		status = obj_hdl->obj_ops.test_access(obj_hdl, access_type,
+		status = obj_hdl->obj_ops->test_access(obj_hdl, access_type,
 						      NULL, NULL, false);
 
 		if (FSAL_IS_ERROR(status))
@@ -638,7 +670,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 
 		fsal_prepare_attrs(&attrs, ATTR_ACL);
 
-		status = obj_hdl->obj_ops.getattrs(obj_hdl, &attrs);
+		status = obj_hdl->obj_ops->getattrs(obj_hdl, &attrs);
 
 		if (FSAL_IS_ERROR(status))
 			return status;
@@ -690,14 +722,17 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 
 	if (retval < 0) {
 		retval = errno;
-		status = fsalstat(posix2fsal_error(retval), retval);
+		status = posix2fsal_status(retval);
 		goto direrr;
 	}
 
 	/* Become the user because we are creating an object in this dir.
 	 */
 	if (createmode != FSAL_NO_CREATE)
-		fsal_set_credentials(op_ctx->creds);
+		if (!vfs_set_credentials(op_ctx->creds, obj_hdl->fsal)) {
+			status = posix2fsal_status(EPERM);
+			goto direrr;
+		}
 
 	if ((posix_flags & O_CREAT) != 0)
 		fd = openat(dir_fd, name, posix_flags, unix_mode);
@@ -714,27 +749,48 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 		 * additional attributes. We don't need to separately track
 		 * the condition of not wanting to set attributes.
 		 */
-		LogFullDebug(COMPONENT_FSAL,
-			     "File %s exists, retrying UNCHECKED create with out O_EXCL",
-			     name);
 		posix_flags &= ~O_EXCL;
 		fd = openat(dir_fd, name, posix_flags, unix_mode);
+
+		/* Preserve errno */
+		retval = errno;
+
+		/* If we were creating, restore credentials now. */
+		if (createmode != FSAL_NO_CREATE)
+			vfs_restore_ganesha_credentials(obj_hdl->fsal);
+
+		LogFullDebug(COMPONENT_FSAL,
+			     "File %s exists, retried UNCHECKED create with out O_EXCL, returned %d (%s)",
+			     name, retval, strerror(retval));
+	} else {
+		/* Preserve errno */
+		retval = errno;
+
+		/* If we were creating, restore credentials now. */
+		if (createmode != FSAL_NO_CREATE)
+			vfs_restore_ganesha_credentials(obj_hdl->fsal);
 	}
 
-	/* Preserve errno */
-	retval = errno;
-
-	/* If we were creating, restore credentials now. */
-	if (createmode != FSAL_NO_CREATE)
-		fsal_restore_ganesha_credentials();
-
 	if (fd < 0) {
-		status = fsalstat(posix2fsal_error(retval), retval);
+		status = posix2fsal_status(retval);
 		goto direrr;
 	}
 
 	LogFullDebug(COMPONENT_FSAL,
 		     "Opened fd=%d for file %s", fd, name);
+
+	/* Check HSM status */
+	status = check_hsm_by_fd(fd);
+	if (FSAL_IS_ERROR(status)) {
+		if (status.major == ERR_FSAL_DELAY) {
+			LogInfo(COMPONENT_FSAL,
+				"HSM restore at open for fd=%d for file %s",
+				fd, name);
+			status = posix2fsal_status(EAGAIN);
+		}
+
+		goto fileerr;
+	}
 
 	/* Remember if we were responsible for creating the file.
 	 * Note that in an UNCHECKED retry we MIGHT have re-created the
@@ -782,7 +838,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 
 	if (retval < 0) {
 		retval = errno;
-		status = fsalstat(posix2fsal_error(retval), retval);
+		status = posix2fsal_status(retval);
 		goto fileerr;
 	}
 
@@ -790,7 +846,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 
 	if (retval < 0) {
 		retval = errno;
-		status = fsalstat(posix2fsal_error(retval), retval);
+		status = posix2fsal_status(retval);
 		goto fileerr;
 	}
 
@@ -799,7 +855,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 			   op_ctx->fsal_export);
 
 	if (hdl == NULL) {
-		status = fsalstat(posix2fsal_error(ENOMEM), ENOMEM);
+		status = posix2fsal_status(ENOMEM);
 		goto fileerr;
 	}
 
@@ -830,7 +886,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 		 * Note if we have ENABLE_VFS_DEBUG_ACL an inherited ACL might
 		 * be part of the attributes we are setting here.
 		 */
-		status = (*new_obj)->obj_ops.setattr2(*new_obj,
+		status = (*new_obj)->obj_ops->setattr2(*new_obj,
 						      false,
 						      state,
 						      attrib_set);
@@ -839,7 +895,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 			goto fileerr;
 
 		if (attrs_out != NULL) {
-			status = (*new_obj)->obj_ops.getattrs(*new_obj,
+			status = (*new_obj)->obj_ops->getattrs(*new_obj,
 							      attrs_out);
 			if (FSAL_IS_ERROR(status) &&
 			    (attrs_out->request_mask & ATTR_RDATTR_ERR) == 0) {
@@ -883,7 +939,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 
  fileerr:
 
-	/* hdl->u.file.fd will be close in obj_ops.release */
+	/* hdl->u.file.fd will be close in obj_ops->release */
 	if (my_fd == &hdl->u.file.fd) {
 		LogFullDebug(COMPONENT_FSAL, "Closing Opened fd %d", fd);
 		close(fd);
@@ -891,7 +947,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 
 	if (*new_obj) {
 		/* Release the handle we just allocated. */
-		(*new_obj)->obj_ops.release(*new_obj);
+		(*new_obj)->obj_ops->release(*new_obj);
 		*new_obj = NULL;
 	}
 
@@ -903,7 +959,7 @@ fsal_status_t vfs_open2(struct fsal_obj_handle *obj_hdl,
 
 	LogFullDebug(COMPONENT_FSAL, "Closing Opened fd %d", dir_fd);
 	close(dir_fd);
-	return fsalstat(posix2fsal_error(retval), retval);
+	return status;
 }
 
 /**
@@ -1108,81 +1164,81 @@ fsal_status_t find_fd(int *fd,
  *
  * This function reads data from the given file. The FSAL must be able to
  * perform the read whether a state is presented or not. This function also
- * is expected to handle properly bypassing or not share reservations.
+ * is expected to handle properly bypassing or not share reservations.  This is
+ * an (optionally) asynchronous call.  When the I/O is complete, the done
+ * callback is called with the results.
  *
- * @param[in]     obj_hdl        File on which to operate
- * @param[in]     bypass         If state doesn't indicate a share reservation,
- *                               bypass any deny read
- * @param[in]     state          state_t to use for this operation
- * @param[in]     offset         Position from which to read
- * @param[in]     buffer_size    Amount of data to read
- * @param[out]    buffer         Buffer to which data are to be copied
- * @param[out]    read_amount    Amount of data read
- * @param[out]    end_of_file    true if the end of file has been reached
- * @param[in,out] info           more information about the data
+ * @param[in]     obj_hdl	File on which to operate
+ * @param[in]     bypass	If state doesn't indicate a share reservation,
+ *				bypass any deny read
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] read_arg	Info about read, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
  *
- * @return FSAL status.
+ * @return Nothing; results are in callback
  */
 
-fsal_status_t vfs_read2(struct fsal_obj_handle *obj_hdl,
-			bool bypass,
-			struct state_t *state,
-			uint64_t offset,
-			size_t buffer_size,
-			void *buffer,
-			size_t *read_amount,
-			bool *end_of_file,
-			struct io_info *info)
+void vfs_read2(struct fsal_obj_handle *obj_hdl,
+	       bool bypass,
+	       fsal_async_cb done_cb,
+	       struct fsal_io_arg *read_arg,
+	       void *caller_arg)
 {
 	int my_fd = -1;
 	ssize_t nb_read;
-	fsal_status_t status;
+	fsal_status_t status = {0, 0};
 	int retval = 0;
 	bool has_lock = false;
 	bool closefd = false;
 	struct vfs_fd *vfs_fd = NULL;
 
-	if (info != NULL) {
+	if (read_arg->info != NULL) {
 		/* Currently we don't support READ_PLUS */
-		return fsalstat(ERR_FSAL_NOTSUPP, 0);
+		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), read_arg,
+			caller_arg);
+		return;
 	}
 
 	if (obj_hdl->fsal != obj_hdl->fs->fsal) {
 		LogDebug(COMPONENT_FSAL,
 			 "FSAL %s operation for handle belonging to FSAL %s, return EXDEV",
 			 obj_hdl->fsal->name, obj_hdl->fs->fsal->name);
-		return fsalstat(posix2fsal_error(EXDEV), EXDEV);
+		done_cb(obj_hdl, fsalstat(posix2fsal_error(EXDEV), EXDEV),
+			read_arg, caller_arg);
+		return;
 	}
 
 	/* Acquire state's fdlock to prevent OPEN upgrade closing the
 	 * file descriptor while we use it.
 	 */
-	if (state) {
-		vfs_fd = &container_of(state, struct vfs_state_fd,
+	if (read_arg->state) {
+		vfs_fd = &container_of(read_arg->state, struct vfs_state_fd,
 				       state)->vfs_fd;
 
 		PTHREAD_RWLOCK_rdlock(&vfs_fd->fdlock);
 	}
 
 	/* Get a usable file descriptor */
-	LogFullDebug(COMPONENT_FSAL, "Calling find_fd, state = %p", state);
-	status = find_fd(&my_fd, obj_hdl, bypass, state, FSAL_O_READ,
+	LogFullDebug(COMPONENT_FSAL, "Calling find_fd, state = %p",
+		     read_arg->state);
+	status = find_fd(&my_fd, obj_hdl, bypass, read_arg->state, FSAL_O_READ,
 			 &has_lock, &closefd, false);
 
 	if (FSAL_IS_ERROR(status))
 		goto out;
 
-	nb_read = pread(my_fd, buffer, buffer_size, offset);
+	nb_read = preadv(my_fd, read_arg->iov, read_arg->iov_count,
+			 read_arg->offset);
 
-	if (offset == -1 || nb_read == -1) {
+	if (read_arg->offset == -1 || nb_read == -1) {
 		retval = errno;
 		status = fsalstat(posix2fsal_error(retval), retval);
 		goto out;
 	}
 
-	*read_amount = nb_read;
+	read_arg->io_amount = nb_read;
 
-	*end_of_file = (nb_read == 0);
+	read_arg->end_of_file = (nb_read == 0);
 
 #if 0
 	/** @todo
@@ -1202,6 +1258,9 @@ fsal_status_t vfs_read2(struct fsal_obj_handle *obj_hdl,
 
  out:
 
+	if (vfs_fd)
+		PTHREAD_RWLOCK_unlock(&vfs_fd->fdlock);
+
 	if (closefd) {
 		LogFullDebug(COMPONENT_FSAL, "Closing Opened fd %d", my_fd);
 		close(my_fd);
@@ -1210,7 +1269,7 @@ fsal_status_t vfs_read2(struct fsal_obj_handle *obj_hdl,
 	if (has_lock)
 		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
 
-	return status;
+	done_cb(obj_hdl, status, read_arg, caller_arg);
 }
 
 /**
@@ -1227,26 +1286,18 @@ fsal_status_t vfs_read2(struct fsal_obj_handle *obj_hdl,
  * @param[in]     obj_hdl        File on which to operate
  * @param[in]     bypass         If state doesn't indicate a share reservation,
  *                               bypass any non-mandatory deny write
- * @param[in]     state          state_t to use for this operation
- * @param[in]     offset         Position at which to write
- * @param[in]     buffer         Data to be written
- * @param[in,out] fsal_stable    In, if on, the fsal is requested to write data
- *                               to stable store. Out, the fsal reports what
- *                               it did.
- * @param[in,out] info           more information about the data
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] write_arg	Info about write, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
  *
  * @return FSAL status.
  */
 
-fsal_status_t vfs_write2(struct fsal_obj_handle *obj_hdl,
-			 bool bypass,
-			 struct state_t *state,
-			 uint64_t offset,
-			 size_t buffer_size,
-			 void *buffer,
-			 size_t *wrote_amount,
-			 bool *fsal_stable,
-			 struct io_info *info)
+void vfs_write2(struct fsal_obj_handle *obj_hdl,
+		bool bypass,
+		fsal_async_cb done_cb,
+		struct fsal_io_arg *write_arg,
+		void *caller_arg)
 {
 	ssize_t nb_written;
 	fsal_status_t status;
@@ -1257,31 +1308,36 @@ fsal_status_t vfs_write2(struct fsal_obj_handle *obj_hdl,
 	fsal_openflags_t openflags = FSAL_O_WRITE;
 	struct vfs_fd *vfs_fd = NULL;
 
-	if (info != NULL) {
+	if (write_arg->info != NULL) {
 		/* Currently we don't support WRITE_PLUS */
-		return fsalstat(ERR_FSAL_NOTSUPP, 0);
+		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), write_arg,
+			caller_arg);
+		return;
 	}
 
 	if (obj_hdl->fsal != obj_hdl->fs->fsal) {
 		LogDebug(COMPONENT_FSAL,
 			 "FSAL %s operation for handle belonging to FSAL %s, return EXDEV",
 			 obj_hdl->fsal->name, obj_hdl->fs->fsal->name);
-		return fsalstat(posix2fsal_error(EXDEV), EXDEV);
+		done_cb(obj_hdl, fsalstat(posix2fsal_error(EXDEV), EXDEV),
+			write_arg, caller_arg);
+		return;
 	}
 
 	/* Acquire state's fdlock to prevent OPEN upgrade closing the
 	 * file descriptor while we use it.
 	 */
-	if (state) {
-		vfs_fd = &container_of(state, struct vfs_state_fd,
+	if (write_arg->state) {
+		vfs_fd = &container_of(write_arg->state, struct vfs_state_fd,
 				       state)->vfs_fd;
 
 		PTHREAD_RWLOCK_rdlock(&vfs_fd->fdlock);
 	}
 
 	/* Get a usable file descriptor */
-	LogFullDebug(COMPONENT_FSAL, "Calling find_fd, state = %p", state);
-	status = find_fd(&my_fd, obj_hdl, bypass, state, openflags,
+	LogFullDebug(COMPONENT_FSAL, "Calling find_fd, state = %p",
+		     write_arg->state);
+	status = find_fd(&my_fd, obj_hdl, bypass, write_arg->state, openflags,
 			 &has_lock, &closefd, false);
 
 	if (FSAL_IS_ERROR(status)) {
@@ -1290,9 +1346,14 @@ fsal_status_t vfs_write2(struct fsal_obj_handle *obj_hdl,
 		goto out;
 	}
 
-	fsal_set_credentials(op_ctx->creds);
+	if (!vfs_set_credentials(op_ctx->creds, obj_hdl->fsal)) {
+		retval = EPERM;
+		status = fsalstat(ERR_FSAL_PERM, EPERM);
+		goto out;
+	}
 
-	nb_written = pwrite(my_fd, buffer, buffer_size, offset);
+	nb_written = pwritev(my_fd, write_arg->iov, write_arg->iov_count,
+			     write_arg->offset);
 
 	if (nb_written == -1) {
 		retval = errno;
@@ -1300,17 +1361,20 @@ fsal_status_t vfs_write2(struct fsal_obj_handle *obj_hdl,
 		goto out;
 	}
 
-	*wrote_amount = nb_written;
+	write_arg->io_amount = nb_written;
 
-	if (*fsal_stable) {
+	if (write_arg->fsal_stable) {
 		retval = fsync(my_fd);
 		if (retval == -1) {
 			retval = errno;
 			status = fsalstat(posix2fsal_error(retval), retval);
+			write_arg->fsal_stable = false;
 		}
 	}
 
  out:
+
+	vfs_restore_ganesha_credentials(obj_hdl->fsal);
 
 	if (vfs_fd)
 		PTHREAD_RWLOCK_unlock(&vfs_fd->fdlock);
@@ -1323,8 +1387,7 @@ fsal_status_t vfs_write2(struct fsal_obj_handle *obj_hdl,
 	if (has_lock)
 		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
 
-	fsal_restore_ganesha_credentials();
-	return status;
+	done_cb(obj_hdl, status, write_arg, caller_arg);
 }
 
 /**
@@ -1371,7 +1434,11 @@ fsal_status_t vfs_commit2(struct fsal_obj_handle *obj_hdl,
 
 	if (!FSAL_IS_ERROR(status)) {
 
-		fsal_set_credentials(op_ctx->creds);
+		if (!vfs_set_credentials(op_ctx->creds, obj_hdl->fsal)) {
+			retval = EPERM;
+			status = fsalstat(ERR_FSAL_PERM, EPERM);
+			goto out;
+		}
 
 		retval = fsync(out_fd->fd);
 
@@ -1380,9 +1447,10 @@ fsal_status_t vfs_commit2(struct fsal_obj_handle *obj_hdl,
 			status = fsalstat(posix2fsal_error(retval), retval);
 		}
 
-		fsal_restore_ganesha_credentials();
+		vfs_restore_ganesha_credentials(obj_hdl->fsal);
 	}
 
+out:
 	if (closefd) {
 		LogFullDebug(COMPONENT_FSAL,
 			     "Closing Opened fd %d", out_fd->fd);
@@ -1522,7 +1590,7 @@ fsal_status_t vfs_lock_op2(struct fsal_obj_handle *obj_hdl,
 
 	if (FSAL_IS_ERROR(status)) {
 		LogCrit(COMPONENT_FSAL, "Unable to find fd for lock operation");
-		return status;
+		goto err;
 	}
 
 	errno = 0;
@@ -1530,6 +1598,7 @@ fsal_status_t vfs_lock_op2(struct fsal_obj_handle *obj_hdl,
 
 	if (retval /* && lock_op == FSAL_OP_LOCK */) {
 		retval = errno;
+		status = posix2fsal_status(retval);
 
 		LogDebug(COMPONENT_FSAL,
 			 "fcntl returned %d %s",
@@ -1541,6 +1610,7 @@ fsal_status_t vfs_lock_op2(struct fsal_obj_handle *obj_hdl,
 
 			if (rc) {
 				retval = errno;	/* we lose the initial error */
+				status = posix2fsal_status(retval);
 				LogCrit(COMPONENT_FSAL,
 					"After failing a lock request, I couldn't even get the details of who owns the lock.");
 				goto err;
@@ -1570,7 +1640,7 @@ fsal_status_t vfs_lock_op2(struct fsal_obj_handle *obj_hdl,
 		}
 	}
 
-	/* Fall through (retval == 0) */
+	/* Fall through (status == SUCCESS) */
 
  err:
 
@@ -1585,7 +1655,7 @@ fsal_status_t vfs_lock_op2(struct fsal_obj_handle *obj_hdl,
 	if (has_lock)
 		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
 
-	return fsalstat(posix2fsal_error(retval), retval);
+	return status;
 }
 #endif
 
@@ -1608,7 +1678,7 @@ fsal_status_t vfs_getattr2(struct fsal_obj_handle *obj_hdl,
 	fsal_status_t status = {0, 0};
 	bool has_lock = false;
 	bool closefd = false;
-	int my_fd;
+	int my_fd = -1;
 
 	myself = container_of(obj_hdl, struct vfs_fsal_obj_handle, obj_handle);
 
@@ -1621,6 +1691,11 @@ fsal_status_t vfs_getattr2(struct fsal_obj_handle *obj_hdl,
 				: "(none)");
 		goto out;
 	}
+
+	#ifdef __FreeBSD__
+	if (obj_hdl->type == SYMBOLIC_LINK)
+		goto fetch;
+	#endif
 
 	/* Get a usable file descriptor (don't need to bypass - FSAL_O_ANY
 	 * won't conflict with any share reservation).
@@ -1649,7 +1724,9 @@ fsal_status_t vfs_getattr2(struct fsal_obj_handle *obj_hdl,
 		}
 		goto out;
 	}
-
+#ifdef __FreeBSD__
+ fetch:
+#endif
 	status = fetch_attrs(myself, my_fd, attrs);
 
  out:
@@ -1719,7 +1796,7 @@ fsal_status_t vfs_setattr2(struct fsal_obj_handle *obj_hdl,
 
 		fsal_prepare_attrs(&attrs, ATTR_ACL);
 
-		status = obj_hdl->obj_ops.getattrs(obj_hdl, &attrs);
+		status = obj_hdl->obj_ops->getattrs(obj_hdl, &attrs);
 
 		if (FSAL_IS_ERROR(status))
 			return status;
@@ -1785,7 +1862,11 @@ fsal_status_t vfs_setattr2(struct fsal_obj_handle *obj_hdl,
 
 	if (FSAL_IS_ERROR(status)) {
 		if (obj_hdl->type == SYMBOLIC_LINK &&
-		    status.major == ERR_FSAL_PERM) {
+		    (status.major == ERR_FSAL_PERM
+#ifdef __FreeBSD__
+		     || status.major == ERR_FSAL_MLINK
+#endif
+			)) {
 			/* You cannot open_by_handle (XFS) a symlink and it
 			 * throws an EPERM error for it.  open_by_handle_at
 			 * does not throw that error for symlinks so we play a

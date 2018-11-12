@@ -328,6 +328,7 @@ void LogClientListEntry(log_levels_t level,
 	char addr[INET6_ADDRSTRLEN];
 	char *paddr = addr;
 	char *client_type;
+	bool free_paddr = false;
 
 	if (!isLevel(component, level))
 		return;
@@ -344,6 +345,7 @@ void LogClientListEntry(log_levels_t level,
 	switch (entry->type) {
 	case NETWORK_CLIENT:
 		paddr = cidr_to_str(entry->client.network.cidr, CIDR_NOFLAGS);
+		free_paddr = true;
 		break;
 
 	case NETGROUP_CLIENT:
@@ -371,6 +373,9 @@ void LogClientListEntry(log_levels_t level,
 	DisplayLogComponentLevel(component, (char *) __FILE__, line, func,
 				 level, "%s%p %s: %s (%s)",
 				 tag, entry, client_type, paddr, perms);
+
+	if (free_paddr)
+		gsh_free(paddr);
 }
 
 static void display_clients(struct gsh_export *export)
@@ -2048,15 +2053,26 @@ static void FreeClientList(struct glist_head *clients)
 		client =
 		    glist_entry(glist, exportlist_client_entry_t, cle_list);
 		glist_del(&client->cle_list);
-		if (client->type == NETGROUP_CLIENT &&
-		    client->client.netgroup.netgroupname != NULL)
+		switch (client->type) {
+		case NETWORK_CLIENT:
+			if (client->client.network.cidr != NULL)
+				cidr_free(client->client.network.cidr);
+			break;
+		case NETGROUP_CLIENT:
 			gsh_free(client->client.netgroup.netgroupname);
-		if (client->type == WILDCARDHOST_CLIENT &&
-		    client->client.wildcard.wildcard != NULL)
+			break;
+		case WILDCARDHOST_CLIENT:
 			gsh_free(client->client.wildcard.wildcard);
-		if (client->type == GSSPRINCIPAL_CLIENT &&
-		    client->client.gssprinc.princname != NULL)
+			break;
+		case GSSPRINCIPAL_CLIENT:
 			gsh_free(client->client.gssprinc.princname);
+			break;
+		case PROTO_CLIENT:
+		case MATCH_ANY_CLIENT:
+		case BAD_CLIENT:
+			/* Do nothing for these client types */
+			break;
+		}
 		gsh_free(client);
 	}
 }
@@ -2150,7 +2166,7 @@ fsal_status_t nfs_export_get_root_entry(struct gsh_export *export,
 	PTHREAD_RWLOCK_rdlock(&export->lock);
 
 	if (export->exp_root_obj)
-		export->exp_root_obj->obj_ops.get_ref(export->exp_root_obj);
+		export->exp_root_obj->obj_ops->get_ref(export->exp_root_obj);
 
 	PTHREAD_RWLOCK_unlock(&export->lock);
 
@@ -2332,7 +2348,7 @@ static void release_export(struct gsh_export *export)
 	PTHREAD_RWLOCK_wrlock(&export->lock);
 
 	glist_del(&export->exp_root_list);
-	export->exp_root_obj->obj_ops.put_ref(export->exp_root_obj);
+	export->exp_root_obj->obj_ops->put_ref(export->exp_root_obj);
 	export->exp_root_obj = NULL;
 
 	(void) atomic_dec_int32_t(&obj->state_hdl->dir.exp_root_refcount);
@@ -2351,6 +2367,8 @@ static void release_export(struct gsh_export *export)
 	 */
 	pseudo_unmount_export(export);
 
+	export->fsal_export->exp_ops.prepare_unexport(export->fsal_export);
+
 	/* Release state belonging to this export */
 	state_release_export(export);
 
@@ -2361,7 +2379,7 @@ static void release_export(struct gsh_export *export)
 	remove_gsh_export(export->export_id);
 
 	/* Release ref taken above */
-	obj->obj_ops.put_ref(obj);
+	obj->obj_ops->put_ref(obj);
 }
 
 void unexport(struct gsh_export *export)

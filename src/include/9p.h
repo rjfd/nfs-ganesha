@@ -42,9 +42,7 @@
 #include "sal_data.h"
 
 #ifdef _USE_9P_RDMA
-#include <infiniband/arch.h>
-#include <rdma/rdma_cma.h>
-#include "mooshika.h"
+#include <mooshika.h>
 #endif
 
 #define NB_PREALLOC_HASH_9P 100
@@ -320,7 +318,7 @@ struct _9p_xattr_desc {
 struct _9p_fid {
 	u32 fid;
 	/** Ganesha export of the file (refcounted). */
-	struct gsh_export *export;
+	struct gsh_export *fid_export;
 	struct _9p_user_cred *ucred; /*< Client credentials (refcounted). */
 	struct group_data *gdata;
 	struct fsal_obj_handle *pentry;

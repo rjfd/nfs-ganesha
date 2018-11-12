@@ -38,6 +38,9 @@
 #include "nfs_core.h"
 #include "nfs_proto_functions.h"
 #include "sal_functions.h"
+#ifdef USE_LTTNG
+#include "gsh_lttng/nfs4.h"
+#endif
 
 /**
  * @brief Pool for allocating session data
@@ -232,16 +235,22 @@ void nfs41_Build_sessionid(clientid4 *clientid, char *sessionid)
 	memcpy(sessionid + sizeof(clientid4), &seq, sizeof(seq));
 }
 
-int32_t inc_session_ref(nfs41_session_t *session)
+int32_t _inc_session_ref(nfs41_session_t *session, const char *func, int line)
 {
 	int32_t refcnt = atomic_inc_int32_t(&session->refcount);
+#ifdef USE_LTTNG
+	tracepoint(nfs4, session_ref, func, line, session, refcnt);
+#endif
 	return refcnt;
 }
 
-int32_t dec_session_ref(nfs41_session_t *session)
+int32_t _dec_session_ref(nfs41_session_t *session, const char *func, int line)
 {
 	int i;
 	int32_t refcnt = atomic_dec_int32_t(&session->refcount);
+#ifdef USE_LTTNG
+	tracepoint(nfs4, session_unref, func, line, session, refcnt);
+#endif
 
 	if (refcnt == 0) {
 
@@ -418,6 +427,82 @@ int nfs41_Session_Del(char sessionid[NFS4_SESSIONID_SIZE])
 void nfs41_Session_PrintAll(void)
 {
 	hashtable_log(COMPONENT_SESSIONS, ht_session_id);
+}
+
+bool check_session_conn(nfs41_session_t *session,
+			compound_data_t *data,
+			bool can_associate)
+{
+	int i, num;
+	sockaddr_t addr;
+	bool associate = false;
+
+	/* Copy the address coming over the wire. */
+	copy_xprt_addr(&addr, data->req->rq_xprt);
+
+	PTHREAD_RWLOCK_rdlock(&session->conn_lock);
+
+retry:
+
+	/* Save number of connections for use outside the lock */
+	num = session->num_conn;
+
+	for (i = 0; i < session->num_conn; i++) {
+		if (isFullDebug(COMPONENT_SESSIONS)) {
+			char str1[LOG_BUFF_LEN / 2] = "\0";
+			char str2[LOG_BUFF_LEN / 2] = "\0";
+			struct display_buffer db1 = {sizeof(str1), str1, str1};
+			struct display_buffer db2 = {sizeof(str2), str2, str2};
+
+			display_sockaddr(&db1, &addr);
+			display_sockaddr(&db2, &session->connections[i]);
+			LogFullDebug(COMPONENT_SESSIONS,
+				     "Comparing addr %s for %s to Session bound addr %s",
+				     str1, data->opname, str2);
+		}
+
+		if (cmp_sockaddr(&addr, &session->connections[i], false)) {
+			/* We found a match */
+			PTHREAD_RWLOCK_unlock(&session->conn_lock);
+			return true;
+		}
+	}
+
+	if (!can_associate || num == NFS41_MAX_CONNECTIONS) {
+		/* We either aren't allowd to associate a new address or there
+		 * is no room.
+		 */
+		PTHREAD_RWLOCK_unlock(&session->conn_lock);
+
+		if (isDebug(COMPONENT_SESSIONS)) {
+			char str1[LOG_BUFF_LEN / 2] = "\0";
+			struct display_buffer db1 = {sizeof(str1), str1, str1};
+
+			display_sockaddr(&db1, &addr);
+			LogDebug(COMPONENT_SESSIONS,
+				     "Found no match for addr %s for %s",
+				     str1, data->opname);
+		}
+
+		return false;
+	}
+
+	if (!associate) {
+		/* First pass was with read lock, now acquire write lock and
+		 * try again.
+		 */
+		associate = true;
+		PTHREAD_RWLOCK_unlock(&session->conn_lock);
+		PTHREAD_RWLOCK_wrlock(&session->conn_lock);
+		goto retry;
+	}
+
+	/* Add the new connection. */
+	memcpy(&session->connections[session->num_conn++], &addr, sizeof(addr));
+
+	PTHREAD_RWLOCK_unlock(&session->conn_lock);
+
+	return true;
 }
 
 /** @} */

@@ -13,7 +13,7 @@ SYNOPSIS
 DESCRIPTION
 ==========================================================
 
-NFS-Ganesha installa the config example for VFS FSAL:
+NFS-Ganesha installs the config example for VFS FSAL:
 | /etc/ganesha/vfs.conf
 
 This file lists VFS specific config options.
@@ -48,7 +48,7 @@ VFS {}
 
 **auth_xdev_export(bool, default false)**
 
-**xattr_access_rights(mode, range 0 to 0777, default 0400)**
+**only_one_user(bool, default fasle)**
 
 See also
 ==============================

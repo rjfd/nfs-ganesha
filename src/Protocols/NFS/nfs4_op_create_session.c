@@ -41,6 +41,25 @@
 #include "nfs_creds.h"
 #include "client_mgr.h"
 #include "fsal.h"
+#ifdef USE_LTTNG
+#include "gsh_lttng/nfs4.h"
+#endif
+
+#define log_channel_attributes(component, chan_attrs, name) \
+	LogFullDebug(component,					\
+		     "%s attributes ca_headerpadsize %"PRIu32	\
+		     " ca_maxrequestsize %"PRIu32		\
+		     " ca_maxresponsesize %"PRIu32		\
+		     " ca_maxresponsesize_cached %"PRIu32	\
+		     " ca_maxoperations %"PRIu32		\
+		     " ca_maxrequests %"PRIu32,			\
+		     name,					\
+		     (chan_attrs)->ca_headerpadsize,		\
+		     (chan_attrs)->ca_maxrequestsize,		\
+		     (chan_attrs)->ca_maxresponsesize,		\
+		     (chan_attrs)->ca_maxresponsesize_cached,	\
+		     (chan_attrs)->ca_maxoperations,		\
+		     (chan_attrs)->ca_maxrequests)
 
 /**
  *
@@ -175,10 +194,11 @@ int nfs4_op_create_session(struct nfs_argop4 *op, compound_data_t *data,
 
 	LogDebug(component,
 		 "CREATE_SESSION clientid=%s csa_sequence=%" PRIu32
-		 " clientid_cs_seq=%" PRIu32 " data_oppos=%d data_use_drc=%d",
+		 " clientid_cs_seq=%" PRIu32
+		 " data_oppos=%d data_use_slot_cached_result=%d",
 		 str_clientid4, arg_CREATE_SESSION4->csa_sequence,
 		 found->cid_create_session_sequence, data->oppos,
-		 data->use_drc);
+		 data->use_slot_cached_result);
 
 	if (isFullDebug(component)) {
 		char str[LOG_BUFF_LEN] = "\0";
@@ -188,7 +208,7 @@ int nfs4_op_create_session(struct nfs_argop4 *op, compound_data_t *data,
 		LogFullDebug(component, "Found %s", str);
 	}
 
-	data->use_drc = false;
+	data->use_slot_cached_result = false;
 
 	if ((arg_CREATE_SESSION4->csa_sequence + 1) ==
 	     found->cid_create_session_sequence) {
@@ -196,7 +216,7 @@ int nfs4_op_create_session(struct nfs_argop4 *op, compound_data_t *data,
 
 		LogDebug(component,
 			 "CREATE_SESSION replay=%p special case",
-			 data->cached_res);
+			 data->cached_result);
 		goto out;
 	} else if (arg_CREATE_SESSION4->csa_sequence !=
 		   found->cid_create_session_sequence) {
@@ -280,6 +300,34 @@ int nfs4_op_create_session(struct nfs_argop4 *op, compound_data_t *data,
 		goto out;
 	}
 
+	log_channel_attributes(component,
+			       &arg_CREATE_SESSION4->csa_fore_chan_attrs,
+			       "Fore Channel");
+	log_channel_attributes(component,
+			       &arg_CREATE_SESSION4->csa_back_chan_attrs,
+			       "Back Channel");
+
+	/* Let's verify the channel attributes for the session first. */
+	if (arg_CREATE_SESSION4->csa_fore_chan_attrs.ca_maxrequestsize <
+						NFS41_MIN_REQUEST_SIZE ||
+	    arg_CREATE_SESSION4->csa_fore_chan_attrs.ca_maxresponsesize <
+						NFS41_MIN_RESPONSE_SIZE ||
+	    arg_CREATE_SESSION4->csa_fore_chan_attrs.ca_maxoperations <
+						NFS41_MIN_OPERATIONS ||
+	    arg_CREATE_SESSION4->csa_fore_chan_attrs.ca_maxrequests == 0 ||
+	    arg_CREATE_SESSION4->csa_back_chan_attrs.ca_maxrequestsize <
+						NFS41_MIN_REQUEST_SIZE ||
+	    arg_CREATE_SESSION4->csa_back_chan_attrs.ca_maxresponsesize <
+						NFS41_MIN_RESPONSE_SIZE ||
+	    arg_CREATE_SESSION4->csa_back_chan_attrs.ca_maxoperations <
+						NFS41_MIN_OPERATIONS ||
+	    arg_CREATE_SESSION4->csa_back_chan_attrs.ca_maxrequests == 0) {
+		LogWarn(component,
+			"Invalid channel attributes");
+		res_CREATE_SESSION4->csr_status = NFS4ERR_TOOSMALL;
+		goto out;
+	}
+
 	/* Record session related information at the right place */
 	nfs41_session = pool_alloc(nfs41_session_pool);
 
@@ -289,6 +337,8 @@ int nfs4_op_create_session(struct nfs_argop4 *op, compound_data_t *data,
 		goto out;
 	}
 
+	copy_xprt_addr(&nfs41_session->connections[0], data->req->rq_xprt);
+	nfs41_session->num_conn = 1;
 	nfs41_session->clientid = clientid;
 	nfs41_session->clientid_record = found;
 	nfs41_session->refcount = 2;	/* sentinel ref + call path ref */
@@ -296,11 +346,11 @@ int nfs4_op_create_session(struct nfs_argop4 *op, compound_data_t *data,
 	    arg_CREATE_SESSION4->csa_fore_chan_attrs;
 	nfs41_session->back_channel_attrs =
 	    arg_CREATE_SESSION4->csa_back_chan_attrs;
-	nfs41_session->xprt = data->req->rq_xprt;
 	nfs41_session->flags = false;
 	nfs41_session->cb_program = 0;
 	PTHREAD_MUTEX_init(&nfs41_session->cb_mutex, NULL);
 	PTHREAD_COND_init(&nfs41_session->cb_cond, NULL);
+	PTHREAD_RWLOCK_init(&nfs41_session->conn_lock, NULL);
 	nfs41_session->nb_slots = MIN(nfs_param.nfsv4_param.nb_slots,
 			nfs41_session->fore_channel_attrs.ca_maxrequests);
 	nfs41_session->fc_slots = gsh_calloc(nfs41_session->nb_slots,
@@ -339,7 +389,10 @@ int nfs4_op_create_session(struct nfs_argop4 *op, compound_data_t *data,
 	       nfs41_session->session_id,
 	       NFS4_SESSIONID_SIZE);
 
-	LogDebug(component, "CREATE_SESSION replay=%p", data->cached_res);
+	LogDebug(component, "CREATE_SESSION replay=%p", data->cached_result);
+#ifdef USE_LTTNG
+	tracepoint(nfs4, session_ref, __func__, __LINE__, nfs41_session, 2);
+#endif
 
 	if (!nfs41_Session_Set(nfs41_session)) {
 		LogDebug(component, "Could not insert session into table");
@@ -484,7 +537,7 @@ int nfs4_op_create_session(struct nfs_argop4 *op, compound_data_t *data,
 	    CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
 		nfs41_session->cb_program = arg_CREATE_SESSION4->csa_cb_program;
 		if (nfs_rpc_create_chan_v41(
-			nfs41_session,
+			data->req->rq_xprt, nfs41_session,
 			arg_CREATE_SESSION4->csa_sec_parms.csa_sec_parms_len,
 			arg_CREATE_SESSION4->csa_sec_parms.csa_sec_parms_val)
 		    == 0) {

@@ -133,7 +133,6 @@ typedef struct nfs41_session_slot__ {
 	struct COMPOUND4res_extended cached_result;	/*< NFv41: pointer to
 							   cached RPC result in
 							   a session's slot */
-	unsigned int cache_used;	/*< If we cached the result */
 } nfs41_session_slot_t;
 
 /**
@@ -152,6 +151,14 @@ enum {
 	session_bc_up = 0x01,
 	session_bc_fault = 0x02, /* not actually used anywhere */
 };
+
+/**
+ * @brief minimum values for channel attributes
+ */
+#define NFS41_MIN_REQUEST_SIZE 256
+#define NFS41_MIN_RESPONSE_SIZE 256
+#define NFS41_MIN_OPERATIONS 2
+#define NFS41_MAX_CONNECTIONS 16
 
 /**
  * @brief Structure representing an NFSv4.1 session
@@ -174,7 +181,10 @@ struct nfs41_session {
 				   and on which we signal when we
 				   free an entry. */
 
-	SVCXPRT *xprt;		/*< Referenced pointer to transport */
+	pthread_rwlock_t conn_lock;
+	int num_conn;
+	sockaddr_t connections[NFS41_MAX_CONNECTIONS];
+
 	nfs_client_id_t *clientid_record;	/*< Client record
 						   correspinding to ID */
 	clientid4 clientid;	/*< Clientid owning this session */
@@ -217,7 +227,6 @@ typedef struct rdel_fh {
 typedef struct clid_entry {
 	struct glist_head cl_list;	/*< Link in the list */
 	struct glist_head cl_rfh_list;
-	bool cl_reclaim_complete;
 	char cl_name[PATH_MAX];	/*< Client name */
 } clid_entry_t;
 

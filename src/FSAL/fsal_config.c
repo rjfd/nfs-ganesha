@@ -102,6 +102,8 @@ bool fsal_supports(struct fsal_staticfsinfo_t *info,
 		return !!info->compute_readdir_cookie;
 	case fso_whence_is_name:
 		return !!info->whence_is_name;
+	case fso_readdir_plus:
+		return !!info->readdir_plus;
 	default:
 		return false;	/* whatever I don't know about,
 				 * you can't do
@@ -129,11 +131,6 @@ uint32_t fsal_maxpathlen(struct fsal_staticfsinfo_t *info)
 	return info->maxpathlen;
 }
 
-struct timespec fsal_lease_time(struct fsal_staticfsinfo_t *info)
-{
-	return info->lease_time;
-}
-
 fsal_aclsupp_t fsal_acl_support(struct fsal_staticfsinfo_t *info)
 {
 	return info->acl_support;
@@ -158,10 +155,4 @@ uint32_t fsal_umask(struct fsal_staticfsinfo_t *info)
 {
 	return info->umask;
 }
-
-uint32_t fsal_xattr_access_rights(struct fsal_staticfsinfo_t *info)
-{
-	return info->xattr_access_rights;
-}
-
 /** @} */

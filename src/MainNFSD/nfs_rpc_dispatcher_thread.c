@@ -177,7 +177,7 @@ static void unregister(const rpcprog_t prog, const rpcvers_t vers1,
 static void unregister_rpc(void)
 {
 	if ((NFS_options & CORE_OPTION_NFSV3) != 0) {
-		unregister(NFS_program[P_NFS], NFS_V2, NFS_V4);
+		unregister(NFS_program[P_NFS], NFS_V3, NFS_V4);
 		unregister(NFS_program[P_MNT], MOUNT_V1, MOUNT_V3);
 	} else {
 		unregister(NFS_program[P_NFS], NFS_V4, NFS_V4);
@@ -988,47 +988,64 @@ void Clean_RPC(void)
 		(u_long) vers,					    \
 		nfs_rpc_dispatch_dummy, netconfig)
 
-void Register_program(protos prot, int flag, int vers)
+#ifdef RPCBIND
+static bool __Register_program(protos prot, int flag, int vers)
 {
 	if ((NFS_options & flag) != 0) {
 		LogInfo(COMPONENT_DISPATCH, "Registering %s V%d/UDP",
 			tags[prot], (int)vers);
 
 		/* XXXX fix svc_register! */
-		if (!UDP_REGISTER(prot, vers, netconfig_udpv4))
-			LogFatal(COMPONENT_DISPATCH,
+		if (!UDP_REGISTER(prot, vers, netconfig_udpv4)) {
+			LogMajor(COMPONENT_DISPATCH,
 				 "Cannot register %s V%d on UDP", tags[prot],
 				 (int)vers);
+			return false;
+		}
 
 		if (!v6disabled && netconfig_udpv6) {
 			LogInfo(COMPONENT_DISPATCH, "Registering %s V%d/UDPv6",
 				tags[prot], (int)vers);
-			if (!UDP_REGISTER(prot, vers, netconfig_udpv6))
-				LogFatal(COMPONENT_DISPATCH,
+			if (!UDP_REGISTER(prot, vers, netconfig_udpv6)) {
+				LogMajor(COMPONENT_DISPATCH,
 					 "Cannot register %s V%d on UDPv6",
 					 tags[prot], (int)vers);
+				return false;
+			}
 		}
 
 #ifndef _NO_TCP_REGISTER
 		LogInfo(COMPONENT_DISPATCH, "Registering %s V%d/TCP",
 			tags[prot], (int)vers);
 
-		if (!TCP_REGISTER(prot, vers, netconfig_tcpv4))
-			LogFatal(COMPONENT_DISPATCH,
+		if (!TCP_REGISTER(prot, vers, netconfig_tcpv4)) {
+			LogMajor(COMPONENT_DISPATCH,
 				 "Cannot register %s V%d on TCP", tags[prot],
 				 (int)vers);
+			return false;
+		}
 
 		if (!v6disabled && netconfig_tcpv6) {
 			LogInfo(COMPONENT_DISPATCH, "Registering %s V%d/TCPv6",
 				tags[prot], (int)vers);
-			if (!TCP_REGISTER(prot, vers, netconfig_tcpv6))
-				LogFatal(COMPONENT_DISPATCH,
+			if (!TCP_REGISTER(prot, vers, netconfig_tcpv6)) {
+				LogMajor(COMPONENT_DISPATCH,
 					 "Cannot register %s V%d on TCPv6",
 					 tags[prot], (int)vers);
+				return false;
+			}
 		}
 #endif				/* _NO_TCP_REGISTER */
 	}
+	return true;
 }
+
+static void Register_program(protos prot, int flag, int vers)
+{
+	if (!__Register_program(prot, flag, vers))
+		Fatal();
+}
+#endif /* RPCBIND */
 
 /**
  * @brief Init the svc descriptors for the nfs daemon
@@ -1175,26 +1192,33 @@ void nfs_Init_svc(void)
 	}
 #endif				/* _HAVE_GSSAPI */
 
-#ifndef _NO_PORTMAPPER
-	/* Perform all the RPC registration, for UDP and TCP,
-	 * for NFS_V2, NFS_V3 and NFS_V4 */
+#ifdef RPCBIND
+	/*
+	 * Perform all the RPC registration, for UDP and TCP, on both NFS_V3
+	 * and NFS_V4. Note that v4 servers are not required to register with
+	 * rpcbind, so we don't fail to start if only that fails.
+	 */
 #ifdef _USE_NFS3
-	Register_program(P_NFS, CORE_OPTION_NFSV3, NFS_V3);
+	if (NFS_options & CORE_OPTION_NFSV3) {
+		Register_program(P_NFS, CORE_OPTION_NFSV3, NFS_V3);
+		Register_program(P_MNT, CORE_OPTION_NFSV3, MOUNT_V1);
+		Register_program(P_MNT, CORE_OPTION_NFSV3, MOUNT_V3);
+	}
 #endif /* _USE_NFS3 */
-	Register_program(P_NFS, CORE_OPTION_NFSV4, NFS_V4);
-	Register_program(P_MNT, CORE_OPTION_NFSV3, MOUNT_V1);
-	Register_program(P_MNT, CORE_OPTION_NFSV3, MOUNT_V3);
+	/* v4 registration is optional */
+	if (NFS_options & CORE_OPTION_NFSV4)
+		__Register_program(P_NFS, CORE_OPTION_NFSV4, NFS_V4);
 #ifdef _USE_NLM
 	if (nfs_param.core_param.enable_NLM)
 		Register_program(P_NLM, CORE_OPTION_NFSV3, NLM4_VERS);
 #endif /* _USE_NLM */
 	if (nfs_param.core_param.enable_RQUOTA &&
-	    (NFS_options & (CORE_OPTION_NFSV3 | CORE_OPTION_NFSV4))) {
+	    (NFS_options & CORE_OPTION_ALL_NFS_VERS)) {
 		Register_program(P_RQUOTA, CORE_OPTION_ALL_VERS, RQUOTAVERS);
 		Register_program(P_RQUOTA, CORE_OPTION_ALL_VERS,
 				 EXT_RQUOTAVERS);
 	}
-#endif				/* _NO_PORTMAPPER */
+#endif	/* RPCBIND */
 
 }
 
@@ -1239,9 +1263,9 @@ static enum xprt_stat nfs_rpc_free_user_data(SVCXPRT *xprt)
  */
 static inline request_data_t *alloc_nfs_request(SVCXPRT *xprt, XDR *xdrs)
 {
-	request_data_t *reqdata = pool_alloc(request_pool);
+	request_data_t *reqdata = pool_alloc(nfs_request_pool);
 
-	(void) atomic_inc_uint64_t(&health.enqueued_reqs);
+	(void) atomic_inc_uint64_t(&nfs_health_.enqueued_reqs);
 
 	/* set the request as NFS already-read */
 	reqdata->rtype = NFS_REQUEST;
@@ -1250,19 +1274,19 @@ static inline request_data_t *alloc_nfs_request(SVCXPRT *xprt, XDR *xdrs)
 	SVC_REF(xprt, SVC_REF_FLAG_NONE);
 	reqdata->r_u.req.svc.rq_xprt = xprt;
 	reqdata->r_u.req.svc.rq_xdrs = xdrs;
-	reqdata->r_u.req.svc.rq_refs = 1;
+	reqdata->r_u.req.svc.rq_refcnt = 1;
 	return reqdata;
 }
 
 int free_nfs_request(request_data_t *reqdata)
 {
 	SVCXPRT *xprt = reqdata->r_u.req.svc.rq_xprt;
-	uint32_t refs = atomic_dec_uint32_t(&reqdata->r_u.req.svc.rq_refs);
+	uint32_t refs = atomic_dec_uint32_t(&reqdata->r_u.req.svc.rq_refcnt);
 
 	LogDebug(COMPONENT_DISPATCH,
-		 "%s: %p fd %d xp_refs %" PRIu32 " rq_refs %" PRIu32,
+		 "%s: %p fd %d xp_refcnt %" PRIu32 " rq_refcnt %" PRIu32,
 		 __func__,
-		 xprt, xprt->xp_fd, xprt->xp_refs,
+		 xprt, xprt->xp_fd, xprt->xp_refcnt,
 		 refs);
 
 	if (refs)
@@ -1279,8 +1303,8 @@ int free_nfs_request(request_data_t *reqdata)
 		break;
 	}
 	SVC_RELEASE(xprt, SVC_RELEASE_FLAG_NONE);
-	pool_free(request_pool, reqdata);
-	(void) atomic_inc_uint64_t(&health.dequeued_reqs);
+	pool_free(nfs_request_pool, reqdata);
+	(void) atomic_inc_uint64_t(&nfs_health_.dequeued_reqs);
 	return 0;
 }
 

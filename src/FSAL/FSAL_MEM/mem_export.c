@@ -58,8 +58,6 @@
 /* helpers to/from other MEM objects
  */
 
-struct fsal_staticfsinfo_t *mem_staticinfo(struct fsal_module *hdl);
-
 /* export object methods
  */
 
@@ -108,103 +106,6 @@ static fsal_status_t mem_get_dynamic_info(struct fsal_export *exp_hdl,
 	infop->time_delta.tv_nsec = 0;
 
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
-}
-
-static bool mem_fs_supports(struct fsal_export *exp_hdl,
-			    fsal_fsinfo_options_t option)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_supports(info, option);
-}
-
-static uint64_t mem_fs_maxfilesize(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_maxfilesize(info);
-}
-
-static uint32_t mem_fs_maxread(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_maxread(info);
-}
-
-static uint32_t mem_fs_maxwrite(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_maxwrite(info);
-}
-
-static uint32_t mem_fs_maxlink(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_maxlink(info);
-}
-
-static uint32_t mem_fs_maxnamelen(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_maxnamelen(info);
-}
-
-static uint32_t mem_fs_maxpathlen(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_maxpathlen(info);
-}
-
-static struct timespec mem_fs_lease_time(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_lease_time(info);
-}
-
-static fsal_aclsupp_t mem_fs_acl_support(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_acl_support(info);
-}
-
-static attrmask_t mem_fs_supported_attrs(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_supported_attrs(info);
-}
-
-static uint32_t mem_fs_umask(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_umask(info);
-}
-
-static uint32_t mem_fs_xattr_access_rights(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = mem_staticinfo(exp_hdl->fsal);
-	return fsal_xattr_access_rights(info);
 }
 
 /* extract a file handle from a buffer.
@@ -286,18 +187,6 @@ void mem_export_ops_init(struct export_ops *ops)
 	ops->wire_to_host = mem_wire_to_host;
 	ops->create_handle = mem_create_handle;
 	ops->get_fs_dynamic_info = mem_get_dynamic_info;
-	ops->fs_supports = mem_fs_supports;
-	ops->fs_maxfilesize = mem_fs_maxfilesize;
-	ops->fs_maxread = mem_fs_maxread;
-	ops->fs_maxwrite = mem_fs_maxwrite;
-	ops->fs_maxlink = mem_fs_maxlink;
-	ops->fs_maxnamelen = mem_fs_maxnamelen;
-	ops->fs_maxpathlen = mem_fs_maxpathlen;
-	ops->fs_lease_time = mem_fs_lease_time;
-	ops->fs_acl_support = mem_fs_acl_support;
-	ops->fs_supported_attrs = mem_fs_supported_attrs;
-	ops->fs_umask = mem_fs_umask;
-	ops->fs_xattr_access_rights = mem_fs_xattr_access_rights;
 	ops->alloc_state = mem_alloc_state;
 }
 
@@ -326,6 +215,7 @@ fsal_status_t mem_create_export(struct fsal_module *fsal_hdl,
 		PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
 #endif
 	PTHREAD_RWLOCK_init(&myself->mfe_exp_lock, &attrs);
+	pthread_rwlockattr_destroy(&attrs);
 	fsal_export_init(&myself->export);
 	mem_export_ops_init(&myself->export.exp_ops);
 

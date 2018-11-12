@@ -147,8 +147,8 @@ fsal_status_t mdcache_lru_pkgshutdown(void);
 
 extern size_t open_fd_count;
 
-mdcache_entry_t *mdcache_lru_get(void);
-void mdcache_lru_insert(mdcache_entry_t *entry);
+mdcache_entry_t *mdcache_lru_get(struct fsal_obj_handle *sub_handle);
+void mdcache_lru_insert(mdcache_entry_t *entry, mdc_reason_t reason);
 #define mdcache_lru_ref(e, f) _mdcache_lru_ref(e, f, __func__, __LINE__)
 fsal_status_t _mdcache_lru_ref(mdcache_entry_t *entry, uint32_t flags,
 			       const char *func, int line);
@@ -196,8 +196,11 @@ static inline void mdcache_put(mdcache_entry_t *entry)
 	mdcache_lru_unref(entry);
 }
 
+void lru_reuse_chunk(mdcache_entry_t *parent, struct dir_chunk *chunk);
 void lru_remove_chunk(struct dir_chunk *chunk);
-struct dir_chunk *mdcache_get_chunk(mdcache_entry_t *parent);
+struct dir_chunk *mdcache_get_chunk(mdcache_entry_t *parent,
+				    struct dir_chunk *prev_chunk,
+				    fsal_cookie_t whence);
 void lru_bump_chunk(struct dir_chunk *chunk);
 
 #endif				/* MDCACHE_LRU_H */

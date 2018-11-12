@@ -325,7 +325,7 @@ void free_client_id(nfs_client_id_t *clientid)
 		struct svc_rpc_gss_data *gd;
 
 		gd = clientid->cid_credential.auth_union.auth_gss.gd;
-		unref_svc_rpc_gss_data(gd, 0);
+		unref_svc_rpc_gss_data(gd);
 	}
 #endif /* _HAVE_GSSAPI */
 	/* For NFSv4.1 clientids, destroy all associated sessions */
@@ -1116,6 +1116,14 @@ bool nfs_client_id_expire(nfs_client_id_t *clientid, bool make_stale)
 					str);
 			}
 		}
+
+		/*
+		 * Decrement reclaim_completes counter if it sent one and was
+		 * in the reclaim table.
+		 */
+		if (clientid->cid_allow_reclaim &&
+		    clientid->cid_cb.v41.cid_reclaim_complete)
+			atomic_dec_int32_t(&reclaim_completes);
 	}
 
 	if (clientid->cid_recov_tag != NULL && !make_stale) {
@@ -1163,7 +1171,7 @@ clientid_status_t nfs_client_id_get(hash_table_t *ht, clientid4 clientid,
 	struct gsh_buffdesc buffkey;
 	struct gsh_buffdesc buffval;
 	clientid_status_t status;
-	uint64_t epoch_low = ServerEpoch & 0xFFFFFFFF;
+	uint64_t epoch_low = nfs_ServerEpoch & 0xFFFFFFFF;
 	uint64_t cid_epoch = (uint64_t) (clientid >> (clientid4) 32);
 	nfs_client_id_t *pclientid;
 
@@ -1358,7 +1366,7 @@ int display_clientid(struct display_buffer *dspbuf, clientid4 clientid)
 clientid4 new_clientid(void)
 {
 	clientid4 newid = atomic_inc_uint32_t(&clientid_counter);
-	uint64_t epoch_low = ServerEpoch & UINT32_MAX;
+	uint64_t epoch_low = nfs_ServerEpoch & UINT32_MAX;
 
 	return newid + (epoch_low << (clientid4) 32);
 }

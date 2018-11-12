@@ -42,12 +42,14 @@
 #include "client_mgr.h"
 #include "fsal.h"
 
-time_t current_grace;
-pthread_mutex_t grace_mutex = PTHREAD_MUTEX_INITIALIZER;        /*< Mutex */
-struct glist_head clid_list = GLIST_HEAD_INIT(clid_list);  /*< Clients */
-struct nfs4_recovery_backend *recovery_backend;
-static int clid_count; /* protected by grace_mutex */
-static int32_t reclaim_completes; /* atomic */
+/* The grace_mutex protects current_grace, clid_list, and clid_count */
+static pthread_mutex_t grace_mutex = PTHREAD_MUTEX_INITIALIZER;
+static time_t current_grace; /* current grace period timeout */
+static int clid_count; /* number of active clients */
+static struct glist_head clid_list = GLIST_HEAD_INIT(clid_list);  /* clients */
+
+static struct nfs4_recovery_backend *recovery_backend;
+int32_t reclaim_completes; /* atomic */
 
 static void nfs4_recovery_load_clids(nfs_grace_start_t *gsp);
 static void nfs_release_nlm_state(char *release_ip);
@@ -59,7 +61,6 @@ clid_entry_t *nfs4_add_clid_entry(char *cl_name)
 
 	glist_init(&new_ent->cl_rfh_list);
 	strcpy(new_ent->cl_name, cl_name);
-	new_ent->cl_reclaim_complete = false;
 	glist_add(&clid_list, &new_ent->cl_list);
 	++clid_count;
 	return new_ent;
@@ -74,7 +75,7 @@ rdel_fh_t *nfs4_add_rfh_entry(clid_entry_t *clid_ent, char *rfh_name)
 	return new_ent;
 }
 
-void nfs4_cleanup_clid_entrys(void)
+void nfs4_cleanup_clid_entries(void)
 {
 	struct clid_entry *clid_entry;
 	/* when not doing a takeover, start with an empty list */
@@ -85,6 +86,8 @@ void nfs4_cleanup_clid_entrys(void)
 		gsh_free(clid_entry);
 		--clid_count;
 	}
+	assert(clid_count == 0);
+	atomic_store_int32_t(&reclaim_completes, 0);
 }
 
 /**
@@ -101,11 +104,20 @@ nfs_lift_grace_locked(time_t current)
 	 * the value to 0 gets to clean up the recovery db.
 	 */
 	if (atomic_fetch_time_t(&current_grace) == current) {
-		nfs4_recovery_cleanup();
+		nfs_end_grace();
 		__sync_synchronize();
 		atomic_store_time_t(&current_grace, (time_t)0);
 		LogEvent(COMPONENT_STATE, "NFS Server Now NOT IN GRACE");
 	}
+}
+
+/*
+ * Report our new state to the cluster
+ */
+static void nfs4_set_enforcing(void)
+{
+	if (recovery_backend->set_enforcing)
+		recovery_backend->set_enforcing();
 }
 
 /**
@@ -153,6 +165,11 @@ void nfs_start_grace(nfs_grace_start_t *gsp)
 
 	LogEvent(COMPONENT_STATE, "NFS Server Now IN GRACE, duration %d",
 		 (int)nfs_param.nfsv4_param.grace_period);
+
+	/* Set enforcing flag here */
+	if (!was_grace)
+		nfs4_set_enforcing();
+
 	/*
 	 * If we're just starting the grace period, then load the
 	 * clid database. Don't load it however if we're extending the
@@ -174,13 +191,16 @@ void nfs_start_grace(nfs_grace_start_t *gsp)
 			cancel_all_nlm_blocked();
 		else {
 			nfs_release_nlm_state(gsp->ipaddr);
-			if (gsp->event == EVENT_RELEASE_IP)
+			if (gsp->event == EVENT_RELEASE_IP) {
+				PTHREAD_MUTEX_unlock(&grace_mutex);
 				nfs_release_v4_client(gsp->ipaddr);
-			else
+				return;
+			}
+			else {
 				nfs4_recovery_load_clids(gsp);
+			}
 		}
 	}
-
 out:
 	PTHREAD_MUTEX_unlock(&grace_mutex);
 }
@@ -196,12 +216,54 @@ bool nfs_in_grace(void)
 	return atomic_fetch_time_t(&current_grace);
 }
 
+/**
+ * @brief Enter the grace period if another node in the cluster needs it
+ *
+ * Singleton servers generally won't use this operation. Clustered servers
+ * call this function to check whether another node might need a grace period.
+ */
+void nfs_maybe_start_grace(void)
+{
+	if (!nfs_in_grace() && recovery_backend->maybe_start_grace)
+		recovery_backend->maybe_start_grace();
+}
+
+/**
+ * @brief Are all hosts in cluster enforcing the grace period?
+ *
+ * Singleton servers always return true here since the only grace period that
+ * matters is the local one. Clustered backends should check to make sure that
+ * the whole cluster is in grace.
+ */
+bool nfs_grace_enforcing(void)
+{
+	if (recovery_backend->grace_enforcing)
+		return recovery_backend->grace_enforcing();
+	return true;
+}
+
+/**
+ * @brief Is this host still a member of the cluster?
+ *
+ * Singleton servers are always considered to be cluster members. This call
+ * is mainly for clustered servers, which may need to handle things differently
+ * on a clean shutdown depending on whether they are still a member of the
+ * cluster.
+ */
+bool nfs_grace_is_member(void)
+{
+	if (recovery_backend->is_member)
+		return recovery_backend->is_member();
+	return true;
+}
+
 void nfs_try_lift_grace(void)
 {
 	bool in_grace = true;
 	int32_t rc_count = 0;
 	time_t current = atomic_fetch_time_t(&current_grace);
 
+	/* Already lifted? Just return */
 	if (!current)
 		return;
 
@@ -219,14 +281,51 @@ void nfs_try_lift_grace(void)
 					time(NULL));
 
 	/*
-	 * Can we lift the grace period now? If so, take the grace_mutex and
-	 * try to do it.
+	 * Can we lift the grace period now? Clustered backends may need
+	 * extra checks before they can do so. If that is the case, then take
+	 * the grace_mutex and try to do it. If the backend does not implement
+	 * a try_lift_grace operation, then we assume it's always ok.
 	 */
 	if (!in_grace) {
-		PTHREAD_MUTEX_lock(&grace_mutex);
-		nfs_lift_grace_locked(current);
-		PTHREAD_MUTEX_unlock(&grace_mutex);
+		if (!recovery_backend->try_lift_grace ||
+		     recovery_backend->try_lift_grace()) {
+			PTHREAD_MUTEX_lock(&grace_mutex);
+			nfs_lift_grace_locked(current);
+			PTHREAD_MUTEX_unlock(&grace_mutex);
+		}
 	}
+}
+
+static pthread_cond_t enforcing_cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t enforcing_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Poll every 5s, just in case we miss the wakeup for some reason */
+void nfs_wait_for_grace_enforcement(void)
+{
+	nfs_grace_start_t gsp = { .event = EVENT_JUST_GRACE };
+
+	pthread_mutex_lock(&enforcing_mutex);
+	nfs_try_lift_grace();
+	while (nfs_in_grace() && !nfs_grace_enforcing()) {
+		struct timespec	timeo = { .tv_sec = time(NULL) + 5,
+					  .tv_nsec = 0 };
+
+		pthread_cond_timedwait(&enforcing_cond, &enforcing_mutex,
+						&timeo);
+
+		pthread_mutex_unlock(&enforcing_mutex);
+		nfs_start_grace(&gsp);
+		nfs_try_lift_grace();
+		pthread_mutex_lock(&enforcing_mutex);
+	}
+	pthread_mutex_unlock(&enforcing_mutex);
+}
+
+void nfs_notify_grace_waiters(void)
+{
+	pthread_mutex_lock(&enforcing_mutex);
+	pthread_cond_broadcast(&enforcing_cond);
+	pthread_mutex_unlock(&enforcing_mutex);
 }
 
 /**
@@ -275,48 +374,6 @@ static bool check_clid(nfs_client_id_t *clientid, clid_entry_t *clid_ent)
 	return ret;
 }
 
-void nfs4_recovery_reclaim_complete(nfs_client_id_t *clientid)
-{
-	struct glist_head *node;
-
-	/* If there are no clients */
-	if (clid_count == 0)
-		return;
-
-	/*
-	 * Loop through the list and try to find a matching client that hasn't
-	 * yet sent a reclaim_complete. If we find it, mark its clid_ent
-	 * record, and increment the reclaim_completes counter.
-	 */
-	PTHREAD_MUTEX_lock(&grace_mutex);
-	glist_for_each(node, &clid_list) {
-		clid_entry_t *clid_ent = glist_entry(node, clid_entry_t,
-						     cl_list);
-
-		/* Skip any that have already sent a reclaim_complete */
-		if (clid_ent->cl_reclaim_complete)
-			continue;
-
-		if (check_clid(clientid, clid_ent)) {
-			if (isDebug(COMPONENT_CLIENTID)) {
-				char str[LOG_BUFF_LEN] = "\0";
-				struct display_buffer dspbuf = {
-					sizeof(str), str, str};
-
-				display_client_id_rec(&dspbuf, clientid);
-
-				LogFullDebug(COMPONENT_CLIENTID,
-					     "RECLAIM_COMPLETE for %s",
-					     str);
-			}
-			clid_ent->cl_reclaim_complete = true;
-			atomic_inc_int32_t(&reclaim_completes);
-			break;
-		}
-	}
-	PTHREAD_MUTEX_unlock(&grace_mutex);
-}
-
 /**
  * @brief Determine whether or not this client may reclaim state
  *
@@ -338,9 +395,8 @@ void  nfs4_chk_clid_impl(nfs_client_id_t *clientid, clid_entry_t **clid_ent_arg)
 		return;
 
 	/*
-	 * loop through the list and try to find this client.  if we
-	 * find it, mark it to allow reclaims.  perhaps the client should
-	 * be removed from the list at this point to make the list shorter?
+	 * loop through the list and try to find this client. If we
+	 * find it, mark it to allow reclaims.
 	 */
 	glist_for_each(node, &clid_list) {
 		clid_ent = glist_entry(node, clid_entry_t, cl_list);
@@ -367,9 +423,6 @@ void  nfs4_chk_clid(nfs_client_id_t *clientid)
 {
 	clid_entry_t *dummy_clid_ent;
 
-	/* If we aren't in grace period, then reclaim is not possible */
-	if (!nfs_in_grace())
-		return;
 	PTHREAD_MUTEX_lock(&grace_mutex);
 	nfs4_chk_clid_impl(clientid, &dummy_clid_ent);
 	PTHREAD_MUTEX_unlock(&grace_mutex);
@@ -388,7 +441,7 @@ static void nfs4_recovery_load_clids(nfs_grace_start_t *gsp)
 
 	/* A NULL gsp pointer indicates an initial startup grace period */
 	if (gsp == NULL)
-		nfs4_cleanup_clid_entrys();
+		nfs4_cleanup_clid_entries();
 	recovery_backend->recovery_read_clids(gsp, nfs4_add_clid_entry,
 						nfs4_add_rfh_entry);
 }
@@ -402,6 +455,8 @@ static int load_backend(const char *name)
 		rados_kv_backend_init(&recovery_backend);
 	else if (!strcmp(name, "rados_ng"))
 		rados_ng_backend_init(&recovery_backend);
+	else if (!strcmp(name, "rados_cluster"))
+		rados_cluster_backend_init(&recovery_backend);
 #endif
 	else if (!strcmp(name, "fs_ng"))
 		fs_ng_backend_init(&recovery_backend);
@@ -417,21 +472,33 @@ static int load_backend(const char *name)
  * should only need to be done once (if at all).  Also, the location
  * of the directory could be configurable.
  */
-void nfs4_recovery_init(void)
+int nfs4_recovery_init(void)
 {
 	if (load_backend(nfs_param.nfsv4_param.recovery_backend)) {
 		LogCrit(COMPONENT_CLIENTID, "Unknown recovery backend");
-		return;
+		return -ENOENT;
 	}
-	recovery_backend->recovery_init();
+	return recovery_backend->recovery_init();
+}
+
+/**
+ * @brief Shut down the recovery backend
+ *
+ * Shut down the recovery backend, cleaning up any clients or tracking
+ * structures in preparation for server shutdown.
+ */
+void nfs4_recovery_shutdown(void)
+{
+	if (recovery_backend->recovery_shutdown)
+		recovery_backend->recovery_shutdown();
 }
 
 /**
  * @brief Clean up recovery directory
  */
-void nfs4_recovery_cleanup(void)
+void nfs_end_grace(void)
 {
-	recovery_backend->recovery_cleanup();
+	recovery_backend->end_grace();
 }
 
 /**

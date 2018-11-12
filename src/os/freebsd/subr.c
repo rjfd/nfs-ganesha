@@ -36,6 +36,7 @@
 #include <sys/time.h>
 #include <log.h>
 #include "syscalls.h"
+#include <sys/module.h>
 
 /**
  * @brief Read system directory entries into the buffer
@@ -125,29 +126,108 @@ int vfs_utimes(int fd, const struct timespec *ts)
 	return futimes(fd, tv);
 }
 
-uid_t setuser(uid_t uid)
+static int setthreaduid(uid_t uid)
 {
-	int rc = 0;
-	uid_t orig_uid = syscall(SYS_getuid);
+	int mod, err;
+	int syscall_num;
+	struct module_stat stat;
 
-	rc = syscall(SYS_seteuid, uid);
-	if (rc != 0)
-		LogCrit(COMPONENT_FSAL, "Could not set user identity");
-	return orig_uid;
+	stat.version = sizeof(stat);
+	/* modstat will retrieve the module_stat structure for our module named
+	 * syscall (see the SYSCALL_MODULE macro which sets the name to syscall)
+	 */
+	mod = modfind("sys/setthreaduid");
+	if (mod == -1)
+		return errno;
+
+	err = modstat(mod, &stat);
+	if (err)
+		return errno;
+	/* extract the slot (syscall) number */
+	syscall_num = stat.data.intval;
+
+	return syscall(syscall_num, uid);
 }
 
-gid_t setgroup(gid_t gid)
+static int setthreadgid(gid_t gid)
 {
-	int rc = 0;
-	gid_t orig_gid = syscall(SYS_getgid);
+	int mod, err;
+	int syscall_num;
+	struct module_stat stat;
 
-	rc = syscall(SYS_setegid, gid);
+	stat.version = sizeof(stat);
+	/* modstat will retrieve the module_stat structure for our module named
+	* syscall (see the SYSCALL_MODULE macro which sets the name to syscall)
+	*/
+	mod = modfind("sys/setthreadgid");
+	if (mod == -1)
+		return errno;
+
+	err = modstat(mod, &stat);
+	if (err)
+		return errno;
+
+	/* extract the slot (syscall) number */
+	syscall_num = stat.data.intval;
+
+	return syscall(syscall_num, gid);
+}
+
+static int setthreadgroups(size_t size, const gid_t *list)
+{
+	int mod, err;
+	int syscall_num;
+	struct module_stat stat;
+
+	stat.version = sizeof(stat);
+	/* modstat will retrieve the module_stat structure for our module named
+	* syscall (see the SYSCALL_MODULE macro which sets the name to syscall)
+	*/
+	mod = modfind("sys/setthreadgroups");
+	if (mod == -1)
+		return errno;
+
+	err = modstat(mod, &stat);
+	if (err)
+		return errno;
+
+	/* extract the slot (syscall) number */
+	syscall_num = stat.data.intval;
+
+	return syscall(syscall_num, size, list);
+}
+
+uid_t getuser(void)
+{
+	return geteuid();
+}
+
+gid_t getgroup(void)
+{
+	return getegid();
+}
+
+void setuser(uid_t uid)
+{
+	int rc = setthreaduid(uid);
+
 	if (rc != 0)
-		LogCrit(COMPONENT_FSAL, "Could not set group identity");
-	return orig_gid;
+		LogCrit(COMPONENT_FSAL,
+			"Could not set user identity %s (%d)",
+			strerror(errno), errno);
+}
+
+void setgroup(gid_t gid)
+{
+	int rc = setthreadgid(gid);
+
+	if (rc != 0)
+		LogCrit(COMPONENT_FSAL,
+			"Could not set group identity %s (%d)",
+			strerror(errno), errno);
 }
 
 int set_threadgroups(size_t size, const gid_t *list)
 {
-	return syscall(SYS_setgroups, size, list);
+	return setthreadgroups(size, list);
 }

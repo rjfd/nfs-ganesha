@@ -111,7 +111,7 @@ static int rados_ng_del(char *key, char *object)
 	return ret;
 }
 
-void rados_ng_init(void)
+static int rados_ng_init(void)
 {
 	int ret;
 	char host[NI_MAXHOST];
@@ -125,42 +125,19 @@ void rados_ng_init(void)
 			LogEvent(COMPONENT_CLIENTID,
 				 "Failed to gethostname: %s",
 				 strerror(errno));
-			return;
+			return -errno;
 		}
 	}
 
 	snprintf(rados_recov_oid, sizeof(rados_recov_oid), "%s.recov", host);
 
-	ret = rados_create(&rados_recov_cluster, rados_kv_param.userid);
+	ret = rados_kv_connect(&rados_recov_io_ctx, rados_kv_param.userid,
+			rados_kv_param.ceph_conf, rados_kv_param.pool,
+			rados_kv_param.namespace);
 	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to rados create");
-		return;
-	}
-	ret = rados_conf_read_file(rados_recov_cluster,
-				   rados_kv_param.ceph_conf);
-	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to read ceph_conf");
-		rados_shutdown(rados_recov_cluster);
-		return;
-	}
-	ret = rados_connect(rados_recov_cluster);
-	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to connect to cluster");
-		rados_shutdown(rados_recov_cluster);
-		return;
-	}
-	ret = rados_pool_create(rados_recov_cluster, rados_kv_param.pool);
-	if (ret < 0 && ret != -EEXIST) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to create pool");
-		rados_shutdown(rados_recov_cluster);
-		return;
-	}
-	ret = rados_ioctx_create(rados_recov_cluster, rados_kv_param.pool,
-				 &rados_recov_io_ctx);
-	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to create ioctx");
-		rados_shutdown(rados_recov_cluster);
-		return;
+		LogEvent(COMPONENT_CLIENTID,
+			"Failed to connect to cluster: %d", ret);
+		return ret;
 	}
 
 	op = rados_create_write_op();
@@ -170,8 +147,8 @@ void rados_ng_init(void)
 	if (ret < 0 && ret != -EEXIST) {
 		LogEvent(COMPONENT_CLIENTID, "Failed to create object");
 		rados_release_write_op(op);
-		rados_shutdown(rados_recov_cluster);
-		return;
+		rados_kv_shutdown();
+		return ret;
 	}
 	rados_release_write_op(op);
 
@@ -180,9 +157,10 @@ void rados_ng_init(void)
 	rados_write_op_omap_clear(grace_op);
 
 	LogEvent(COMPONENT_CLIENTID, "Rados kv store init done");
+	return 0;
 }
 
-void rados_ng_add_clid(nfs_client_id_t *clientid)
+static void rados_ng_add_clid(nfs_client_id_t *clientid)
 {
 	char ckey[RADOS_KEY_MAX_LEN];
 	char *cval;
@@ -207,7 +185,7 @@ out:
 	gsh_free(cval);
 }
 
-void rados_ng_rm_clid(nfs_client_id_t *clientid)
+static void rados_ng_rm_clid(nfs_client_id_t *clientid)
 {
 	char ckey[RADOS_KEY_MAX_LEN];
 	int ret;
@@ -226,15 +204,14 @@ void rados_ng_rm_clid(nfs_client_id_t *clientid)
 	clientid->cid_recov_tag = NULL;
 }
 
-static void rados_ng_pop_clid_entry(char *key,
-				    char *val,
-				    add_clid_entry_hook add_clid_entry,
-				    add_rfh_entry_hook add_rfh_entry,
-				    bool old, bool takeover)
+static void rados_ng_pop_clid_entry(char *key, char *val,
+				    struct pop_args *pop_args)
 {
 	char *dupval, *cl_name;
 	char *rfh_names, *rfh_name;
 	clid_entry_t *clid_ent;
+	add_clid_entry_hook add_clid_entry = pop_args->add_clid_entry;
+	add_rfh_entry_hook add_rfh_entry = pop_args->add_rfh_entry;
 
 	/* extract clid records */
 	dupval = gsh_strdup(val);
@@ -271,7 +248,7 @@ rados_ng_read_recov_clids_recover(add_clid_entry_hook add_clid_entry,
 	}
 }
 
-void rados_ng_read_recov_clids_takeover(nfs_grace_start_t *gsp,
+static void rados_ng_read_recov_clids_takeover(nfs_grace_start_t *gsp,
 					add_clid_entry_hook add_clid_entry,
 					add_rfh_entry_hook add_rfh_entry)
 {
@@ -285,7 +262,7 @@ void rados_ng_read_recov_clids_takeover(nfs_grace_start_t *gsp,
 		 "Unable to perform takeover with rados_ng recovery backend.");
 }
 
-void rados_ng_cleanup_old(void)
+static void rados_ng_cleanup_old(void)
 {
 	int ret;
 
@@ -303,41 +280,14 @@ void rados_ng_cleanup_old(void)
 	PTHREAD_MUTEX_unlock(&grace_op_lock);
 }
 
-void rados_ng_add_revoke_fh(nfs_client_id_t *delr_clid, nfs_fh4 *delr_handle)
-{
-	int ret;
-	char ckey[RADOS_KEY_MAX_LEN];
-	char *cval;
-
-	cval = gsh_malloc(RADOS_VAL_MAX_LEN);
-
-	rados_kv_create_key(delr_clid, ckey);
-	ret = rados_kv_get(ckey, cval, rados_recov_oid);
-	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to get %s", ckey);
-		goto out;
-	}
-
-	rados_kv_append_val_rdfh(cval, delr_handle->nfs_fh4_val,
-				      delr_handle->nfs_fh4_len);
-
-	ret = rados_ng_put(ckey, cval, rados_recov_oid);
-	if (ret < 0) {
-		LogEvent(COMPONENT_CLIENTID, "Failed to add rdfh for clid %lu",
-			 delr_clid->cid_clientid);
-	}
-
-out:
-	gsh_free(cval);
-}
-
 struct nfs4_recovery_backend rados_ng_backend = {
 	.recovery_init = rados_ng_init,
-	.recovery_cleanup = rados_ng_cleanup_old,
+	.recovery_shutdown = rados_kv_shutdown,
+	.end_grace = rados_ng_cleanup_old,
 	.recovery_read_clids = rados_ng_read_recov_clids_takeover,
 	.add_clid = rados_ng_add_clid,
 	.rm_clid = rados_ng_rm_clid,
-	.add_revoke_fh = rados_ng_add_revoke_fh,
+	.add_revoke_fh = rados_kv_add_revoke_fh,
 };
 
 void rados_ng_backend_init(struct nfs4_recovery_backend **backend)

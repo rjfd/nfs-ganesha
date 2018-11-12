@@ -341,6 +341,20 @@ typedef struct fsal_acl_data__ {
 	IS_FSAL_ACE_BIT(GET_FSAL_ACE_PERM(ACE), FSAL_ACE_PERM_SYNCHRONIZE)
 
 /**
+ * Stores root and fs locations. fs locations format is as follows
+ *
+ * <server>:<path>
+ */
+typedef struct fsal_fs_locations {
+	uint32_t ref;
+	uint32_t nservers;	/* size of server array */
+	pthread_rwlock_t lock;
+	char *fs_root;
+	char *rootpath;
+	utf8string *server;
+} fsal_fs_locations_t;
+
+/**
  * Defines an attribute mask.
  *
  * Do not just use OR and AND to test these, use the macros.
@@ -471,6 +485,8 @@ struct attrlist {
 	uint64_t generation;	/*< Generation number for this file */
 	int32_t expire_time_attr;	/*< Expiration time interval in seconds
 					   for attributes. Settable by FSAL. */
+	fsal_fs_locations_t *fs_locations;	/*< fs locations for this
+						    object if any */
 };
 
 /******************************************************
@@ -648,6 +664,7 @@ typedef enum enum_fsal_fsinfo_options {
 	fso_rename_changes_key,
 	fso_compute_readdir_cookie,
 	fso_whence_is_name,
+	fso_readdir_plus,
 } fsal_fsinfo_options_t;
 
 /* The largest maxread and maxwrite value */
@@ -668,7 +685,6 @@ typedef struct fsal_staticfsinfo_t {
 	bool lock_support_async_block;	/*< FS supports blocking locks? */
 	bool named_attr;	/*< FS supports named attributes. */
 	bool unique_handles;	/*< Handles are unique and persistent. */
-	struct timespec lease_time;	/*< Duration of lease at FS in secs */
 	fsal_aclsupp_t acl_support;	/*< what type of ACLs are supported */
 	bool cansettime;	/*< Is it possible to change file times
 				   using SETATTR. */
@@ -685,8 +701,6 @@ typedef struct fsal_staticfsinfo_t {
 					   it is possible to cross junctions
 					   for resolving an NFS export path. */
 
-	uint32_t xattr_access_rights;	/*< This indicates who is allowed
-					   to read/modify xattrs value. */
 	uint32_t delegations;	/*< fsal supports delegations */
 	bool pnfs_mds;		/*< fsal supports file pnfs MDS */
 	bool pnfs_ds;		/*< fsal supports file pnfs DS */
@@ -696,6 +710,7 @@ typedef struct fsal_staticfsinfo_t {
 	bool rename_changes_key;/*< Handle key is changed across rename */
 	bool compute_readdir_cookie;
 	bool whence_is_name;
+	bool readdir_plus;	/*< FSAL supports readdir_plus */
 } fsal_staticfsinfo_t;
 
 /**
@@ -750,7 +765,7 @@ typedef enum fsal_errors_t {
 	ERR_FSAL_BLOCKED = 20014,
 	ERR_FSAL_TIMEOUT = 20015,
 	ERR_FSAL_FILE_OPEN = 10046,
-	ERR_FSAL_UNION_NOTSUPP = 10094,
+	ERR_FSAL_UNION_NOTSUPP = 10090,
 	ERR_FSAL_IN_GRACE = 10095,
 	ERR_FSAL_NO_ACE = 10096,
 	ERR_FSAL_CROSS_JUNCTION = 10097,

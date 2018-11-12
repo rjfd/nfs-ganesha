@@ -26,7 +26,7 @@
  */
 
 #include <sys/types.h>
-#include <attr/xattr.h> /* ENOATTR */
+#include "os/xattr.h"
 #include "gluster_internal.h"
 #include "fsal_api.h"
 #include "fsal_convert.h"
@@ -116,14 +116,6 @@ void stat2fsal_attributes(const struct stat *buffstat,
 	fsalattr->rawdev = posix2fsal_devt(buffstat->st_rdev);
 }
 
-struct fsal_staticfsinfo_t *gluster_staticinfo(struct fsal_module *hdl)
-{
-	struct glusterfs_fsal_module *glfsal_module;
-
-	glfsal_module = container_of(hdl, struct glusterfs_fsal_module, fsal);
-	return &glfsal_module->fs_info;
-}
-
 /**
  * @brief Construct a new filehandle
  *
@@ -140,13 +132,9 @@ struct fsal_staticfsinfo_t *gluster_staticinfo(struct fsal_module *hdl)
 
 void construct_handle(struct glusterfs_export *glexport, const struct stat *st,
 		      struct glfs_object *glhandle, unsigned char *globjhdl,
-		      int len, struct glusterfs_handle **obj,
-		      const char *vol_uuid)
+		      struct glusterfs_handle **obj, const char *vol_uuid)
 {
 	struct glusterfs_handle *constructing = NULL;
-	glusterfs_fsal_xstat_t buffxstat;
-
-	memset(&buffxstat, 0, sizeof(glusterfs_fsal_xstat_t));
 
 	constructing = gsh_calloc(1, sizeof(struct glusterfs_handle));
 
@@ -160,7 +148,7 @@ void construct_handle(struct glusterfs_export *glexport, const struct stat *st,
 			     posix2fsal_type(st->st_mode));
 	constructing->handle.fsid = posix2fsal_fsid(st->st_dev);
 	constructing->handle.fileid = st->st_ino;
-	handle_ops_init(&constructing->handle.obj_ops);
+	constructing->handle.obj_ops = &GlusterFS.handle_ops;
 
 	*obj = constructing;
 }

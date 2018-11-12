@@ -22,8 +22,6 @@ MEM {}
 RGW {}
 VFS {}
 XFS {}
-PROXY {}
-PROXY { Remote_Server {} }
 RADOS_KV {}
 RADOS_URLS {}
 
@@ -358,13 +356,65 @@ EXPORT { FSAL {} }
 
 	transport(enum, values [tcp, rdma], default tcp)
 
-	FSAL_VFS:
+	FSAL_VFS or FSAL_LUSTRE:
 	---------
 
 	pnfs(bool, default false)
 
 	fsid_type(enum, values [None, One64, Major64, Two64, uuid, Two32, Dev,
 			        Device], no default)
+
+    FSAL_LUSTRE:
+	---------
+	async_hsm_restore(bool, default true)
+
+    FSAL_PROXY:
+    ----------
+
+	Retry_SleepTime(uint32, range 0 to 60, default 10)
+
+	Srv_Addr(ipv4_addr default "127.0.0.1")
+
+	NFS_Service(uint32, range 0 to UINT32_MAX, default 100003)
+
+	/*NFS_SendSize must be greater than maxwrite+SEND_RECV_HEADER_SPACE .*/
+	/*NFS_RecvSize must be greater than maxread+SEND_RECV_HEADER_SPACE .*/
+	/*MAX_READ_WRITE_SIZE == 1 MB*/
+	/*SEND_RECV_HEADER_SPACE == 512 Bytes*/
+	/*FSAL_MAXIOSIZE = 64 MB*/
+	NFS_SendSize(uint64, range 512 + SEND_RECV_HEADER_SPACE
+					to FSAL_MAXIOSIZE,
+		     default MAX_READ_WRITE_SIZE + SEND_RECV_HEADER_SPACE)
+
+	NFS_RecvSize(uint64, range 512 + SEND_RECV_HEADER_SPACE
+					to FSAL_MAXIOSIZE,
+		     default MAX_READ_WRITE_SIZE + SEND_RECV_HEADER_SPACE)
+
+	NFS_Port(uint16, range 0 to UINT16_MAX, default 2049)
+
+	Use_Privileged_Client_Port(bool, default true)
+
+	RPC_Client_Timeout(uint32, range 1 to 60*4, default 60)
+
+	Remote_PrincipalName(string, no default)
+
+	KeytabPath(string, default "/etc/krb5.keytab")
+
+	Credential_LifeTime(uint32, range 0 to 86400*2, default 86400)
+
+	Sec_Type(enum, values [krb5, krb5i, krb5p], default krb5)
+
+	Active_krb5(bool, default false)
+
+	Enable_Handle_Mapping(bool, default false)
+
+	HandleMap_DB_Dir(string, default "/var/ganesha/handlemap")
+
+	HandleMap_Tmp_Dir(string, default "/var/ganesha/tmp")
+
+	HandleMap_DB_Count(uint32, range 1 to 16, default 8)
+
+	HandleMap_HashTable_Size(uint32, range 1 to 127, default 103)
 
 	EXPORT { FSAL { PNFS { } } }
 	---------------------------
@@ -485,10 +535,6 @@ CACHEINODE
 
 	Use_Getattr_Directory_Invalidation(bool, default false)
 
-	Dir_Max_Deleted(uint32, range 1 to UINT32_MAX, default 65536)
-
-	Dir_Max(uint32, range 1 to UINT32_MAX, default 65536)
-
 	Dir_Chunk(uint32, range 0 to UINT32_MAX, default 128)
 
 	Detached_Mult(uint32, range 1 to UINT32_MAX, default 1)
@@ -507,15 +553,13 @@ CACHEINODE
 
 	Reaper_Work(uint32, range 1 to 2000, default 0)
 
-	Reaper_Work_Per_Lane(uint32, range 1 to 2000, default 50)
+	Reaper_Work_Per_Lane(uint32, range 1 to UINT32_MAX, default 50)
 
 	Biggest_Window(uint32, range 1 to 100, default 40)
 
 	Required_Progress(uint32, range 1 to 50, default 5)
 
 	Futility_Count(uint32, range 1 to 50, default 8)
-
-	Retry_Readdir(bool, default false)
 
 9P {}
 -----
@@ -541,8 +585,6 @@ CEPH {}
 
 	umask(mode, range 0 to 0777, default 0)
 
-	xattr_access_rights(mode, range 0 to 0777, default 0)
-
 GPFS {}
 -------
 
@@ -555,8 +597,6 @@ GPFS {}
 	umask(mode, range 0 to 0777, default 0)
 
 	auth_xdev_export(bool, default false)
-
-	xattr_access_rights(mode, range 0 to 0777, default 0400)
 
 	Delegations(enum, values [None, read, write, readwrite, r, w, rw],
 		    default read)
@@ -625,7 +665,7 @@ VFS {}
 
 	auth_xdev_export(bool, default false)
 
-	xattr_access_rights(mode, range 0 to 0777, default 0400)
+    only_one_user(bool, default false)
 
 XFS {}
 ------
@@ -644,80 +684,6 @@ XFS {}
 
 	auth_xdev_export(bool, default false)
 
-	xattr_access_rights(mode, range 0 to 0777, default 0400)
-
-PROXY {}
---------
-
-	link_support(bool, default true)
-
-	symlink_support(bool, default true)
-
-	cansettime(bool, default true)
-
-	/*MAX_READ_WRITE_SIZE == 1MB*/
-	/*FSAL_MAXIOSIZE = 64 MB*/
-	/*SEND_RECV_HEADER_SPACE == 512 Bytes*/
-	maxread(uint64, range 512 to FSAL_MAXIOSIZE - SEND_RECV_HEADER_SPACE,
-		default MAX_READ_WRITE_SIZE)
-
-	maxwrite(uint64, range 512 to FSAL_MAXIOSIZE - SEND_RECV_HEADER_SPACE,
-		 default MAX_READ_WRITE_SIZE)
-
-	umask(mode, range 0 to 0777, default 0)
-
-	auth_xdev_export(bool, default false)
-
-	xattr_access_rights(mode, range 0 to 0777, default 0400)
-
-PROXY { Remote_Server {} }
---------------------------
-
-	Retry_SleepTime(uint32, range 0 to 60, default 10)
-
-	Srv_Addr(ipv4_addr default "127.0.0.1")
-
-	NFS_Service(uint32, range 0 to UINT32_MAX, default 100003)
-
-	/*NFS_SendSize must be greater than maxwrite+SEND_RECV_HEADER_SPACE .*/
-	/*NFS_RecvSize must be greater than maxread+SEND_RECV_HEADER_SPACE .*/
-	/*MAX_READ_WRITE_SIZE == 1 MB*/
-	/*SEND_RECV_HEADER_SPACE == 512 Bytes*/
-	/*FSAL_MAXIOSIZE = 64 MB*/
-	NFS_SendSize(uint32, range 512 + SEND_RECV_HEADER_SPACE
-					to FSAL_MAXIOSIZE,
-		     default MAX_READ_WRITE_SIZE + SEND_RECV_HEADER_SPACE)
-
-	NFS_RecvSize(uint32, range 512 + SEND_RECV_HEADER_SPACE
-					to FSAL_MAXIOSIZE,
-		     default MAX_READ_WRITE_SIZE + SEND_RECV_HEADER_SPACE)
-
-	NFS_Port(uint16, range 0 to UINT16_MAX, default 2049)
-
-	Use_Privileged_Client_Port(bool, default true)
-
-	RPC_Client_Timeout(uint32, range 1 to 60*4, default 60)
-
-	Remote_PrincipalName(string, no default)
-
-	KeytabPath(string, default "/etc/krb5.keytab")
-
-	Credential_LifeTime(uint32, range 0 to 86400*2, default 86400)
-
-	Sec_Type(enum, values [krb5, krb5i, krb5p], default krb5)
-
-	Active_krb5(bool, default false)
-
-	Enable_Handle_Mapping(bool, default false)
-
-	HandleMap_DB_Dir(string, default "/var/ganesha/handlemap")
-
-	HandleMap_Tmp_Dir(string, default "/var/ganesha/tmp")
-
-	HandleMap_DB_Count(uint32, range 1 to 16, default 8)
-
-	HandleMap_HashTable_Size(uint32, range 1 to 127, default 103)
-
 RADOS_KV {}
 --------
 
@@ -725,7 +691,13 @@ RADOS_KV {}
 
 	userid(path, no default)
 
-	pool(string, no default)
+	namespace(string, default NULL)
+
+	pool(string, default "nfs-ganesha")
+
+	grace_oid(string, default "grace")
+
+	nodeid(string, default result of gethostname())
 
 RADOS_URLS {}
 --------

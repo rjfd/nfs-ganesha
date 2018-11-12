@@ -507,7 +507,7 @@ static bool client_to_dbus(struct gsh_client *cl_node, void *state)
 	const char *addrp;
 	int addr_type;
 	DBusMessageIter struct_iter;
-	struct timespec last_as_ts = ServerBootTime;
+	struct timespec last_as_ts = nfs_ServerBootTime;
 
 	cl = container_of(cl_node, struct server_stats, client);
 	addr_type = (cl_node->addr.len == 4) ? AF_INET : AF_INET6;
@@ -1059,6 +1059,7 @@ void client_pkginit(void)
 	client_by_ip.cache_sz = 32767;
 	client_by_ip.cache =
 	    gsh_calloc(client_by_ip.cache_sz, sizeof(struct avltree_node *));
+	pthread_rwlockattr_destroy(&rwlock_attr);
 }
 
 /** @} */

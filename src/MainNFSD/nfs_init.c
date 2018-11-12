@@ -71,7 +71,6 @@
 #include "netgroup_cache.h"
 #include "pnfs_utils.h"
 #include "mdcache.h"
-#include <execinfo.h>
 #include "common_utils.h"
 #include "nfs_init.h"
 
@@ -82,15 +81,15 @@
 struct nfs_init nfs_init;
 
 /* global information exported to all layers (as extern vars) */
-pool_t *request_pool;
+pool_t *nfs_request_pool;
 nfs_parameter_t nfs_param;
-struct _nfs_health health;
+struct _nfs_health nfs_health_;
 
 static struct _nfs_health healthstats;
 
 /* ServerEpoch is ServerBootTime unless overriden by -E command line option */
-struct timespec ServerBootTime;
-time_t ServerEpoch;
+struct timespec nfs_ServerBootTime;
+time_t nfs_ServerEpoch;
 
 verifier4 NFS4_write_verifier;	/* NFS V4 write verifier */
 writeverf3 NFS3_write_verifier;	/* NFS V3 write verifier */
@@ -127,9 +126,9 @@ pthread_t _9p_rdma_dispatcher_thrid;
 pthread_t nfs_rdma_dispatcher_thrid;
 #endif
 
-char *config_path = GANESHA_CONFIG_PATH;
+char *nfs_config_path = GANESHA_CONFIG_PATH;
 
-char *pidfile_path = GANESHA_PIDFILE_PATH;
+char *nfs_pidfile_path = GANESHA_PIDFILE_PATH;
 
 /**
  * @brief Reread the configuration file to accomplish update of options.
@@ -160,7 +159,7 @@ void reread_config(void)
 	/* If no configuration file is given, then the caller must want to
 	 * reparse the configuration file from startup.
 	 */
-	if (config_path[0] == '\0') {
+	if (nfs_config_path[0] == '\0') {
 		LogCrit(COMPONENT_CONFIG,
 			"No configuration file was specified for reloading log config.");
 		return;
@@ -170,12 +169,12 @@ void reread_config(void)
 	if (!init_error_type(&err_type))
 		return;
 	/* Attempt to parse the new configuration file */
-	config_struct = config_ParseFile(config_path, &err_type);
+	config_struct = config_ParseFile(nfs_config_path, &err_type);
 	if (!config_error_no_error(&err_type)) {
 		config_Free(config_struct);
 		LogCrit(COMPONENT_CONFIG,
 			"Error while parsing new configuration file %s",
-			config_path);
+			nfs_config_path);
 		report_config_errors(&err_type, NULL, config_errs_to_log);
 		return;
 	}
@@ -235,26 +234,6 @@ static void *sigmgr_thread(void *UnusedArg)
 	return NULL;
 }
 
-static void gsh_backtrace(void)
-{
-#define MAX_STACK_DEPTH		32	/* enough ? */
-	void *buffer[MAX_STACK_DEPTH];
-	char **traces;
-	int i, nlines;
-
-	nlines = backtrace(buffer, MAX_STACK_DEPTH);
-	traces = backtrace_symbols(buffer, nlines);
-
-	if (!traces) {
-		return;
-	}
-
-	for (i = 0; i < nlines; i++) {
-		LogMajor(COMPONENT_INIT, "%s", traces[i]);
-	}
-
-	free(traces);
-}
 
 static void crash_handler(int signo, siginfo_t *info, void *ctx)
 {
@@ -302,11 +281,11 @@ static void init_crash_handlers(void)
  * @param[in] log_path     Log path
  * @param[in] dump_trace   Dump trace when segfault
  */
-void nfs_prereq_init(char *program_name, char *host_name, int debug_level,
-		     char *log_path, bool dump_trace)
+void nfs_prereq_init(const char *program_name, const char *host_name,
+		     int debug_level, const char *log_path, bool dump_trace)
 {
-	healthstats.enqueued_reqs = health.enqueued_reqs = 0;
-	healthstats.enqueued_reqs = health.dequeued_reqs = 0;
+	healthstats.enqueued_reqs = nfs_health_.enqueued_reqs = 0;
+	healthstats.enqueued_reqs = nfs_health_.dequeued_reqs = 0;
 
 	/* Initialize logging */
 	SetNamePgm(program_name);
@@ -552,14 +531,15 @@ static void nfs_Start_threads(void)
 	LogDebug(COMPONENT_THREAD, "sigmgr thread started");
 
 #ifdef _USE_9P
-	rc = _9p_worker_init();
-	if (rc != 0) {
-		LogFatal(COMPONENT_THREAD, "Could not start worker threads: %d",
-			 errno);
-	}
-
-	/* Starting the 9P/TCP dispatcher thread */
 	if (nfs_param.core_param.core_options & CORE_OPTION_9P) {
+		/* Start 9P worker threads */
+		rc = _9p_worker_init();
+		if (rc != 0) {
+			LogFatal(COMPONENT_THREAD,
+				 "Could not start worker threads: %d", errno);
+		}
+
+		/* Starting the 9P/TCP dispatcher thread */
 		rc = pthread_create(&_9p_dispatcher_thrid, &attr_thr,
 				    _9p_dispatcher_thread, NULL);
 		if (rc != 0) {
@@ -625,6 +605,7 @@ static void nfs_Start_threads(void)
 	}
 	LogEvent(COMPONENT_THREAD, "General fridge was started successfully");
 
+	pthread_attr_destroy(&attr_thr);
 }
 
 /**
@@ -661,7 +642,7 @@ static void nfs_Init(const nfs_start_info_t *p_start_info)
 	nfs41_session_pool =
 	    pool_basic_init("NFSv4.1 session pool", sizeof(nfs41_session_t));
 
-	request_pool =
+	nfs_request_pool =
 	    pool_basic_init("Request pool", sizeof(request_data_t));
 
 	/* If rpcsec_gss is used, set the path to the keytab */
@@ -815,14 +796,6 @@ static void nfs_Init(const nfs_start_info_t *p_start_info)
 	/* Save Ganesha thread credentials with Frank's routine for later use */
 	fsal_save_ganesha_credentials();
 
-	/* Create stable storage directory, this needs to be done before
-	 * starting the recovery thread.
-	 */
-	nfs4_recovery_init();
-
-	/* Start grace period */
-	nfs_start_grace(NULL);
-
 	/* RPC Initialisation - exits on failure */
 	nfs_Init_svc();
 	LogInfo(COMPONENT_INIT, "RPC resources successfully initialized");
@@ -849,66 +822,63 @@ static void nfs_Init(const nfs_start_info_t *p_start_info)
 
 static void lower_my_caps(void)
 {
-	struct __user_cap_header_struct caphdr = {
-		.version = _LINUX_CAPABILITY_VERSION
-	};
-	cap_user_data_t capdata;
-	ssize_t capstrlen = 0;
-	cap_t my_cap;
+	cap_value_t cap_values[] = {CAP_SYS_RESOURCE};
+	cap_t cap;
 	char *cap_text;
-	int capsz;
+	ssize_t capstrlen = 0;
+	int ret;
 
 	if (!nfs_start_info.drop_caps) {
 		/* Skip dropping caps by request */
 		return;
 	}
 
-	(void) capget(&caphdr, NULL);
-	switch (caphdr.version) {
-	case _LINUX_CAPABILITY_VERSION_1:
-		capsz = _LINUX_CAPABILITY_U32S_1;
-		break;
-	case _LINUX_CAPABILITY_VERSION_2:
-		capsz = _LINUX_CAPABILITY_U32S_2;
-		break;
-	default:
-		abort(); /* can't happen */
+	cap = cap_get_proc();
+	if (cap == NULL) {
+		LogFatal(COMPONENT_INIT,
+			 "cap_get_proc() failed, %s", strerror(errno));
 	}
 
-	capdata = gsh_calloc(capsz, sizeof(struct __user_cap_data_struct));
-	caphdr.pid = getpid();
-
-	if (capget(&caphdr, capdata) != 0)
+	ret = cap_set_flag(cap, CAP_EFFECTIVE,
+			   sizeof(cap_values) / sizeof(cap_values[0]),
+			   cap_values, CAP_CLEAR);
+	if (ret != 0) {
 		LogFatal(COMPONENT_INIT,
-			 "Failed to query capabilities for process, errno=%u",
-			 errno);
+			 "cap_set_flag() failed, %s", strerror(errno));
+	}
 
-	/* Set the capability bitmask to remove CAP_SYS_RESOURCE */
-	if (capdata->effective & CAP_TO_MASK(CAP_SYS_RESOURCE))
-		capdata->effective &= ~CAP_TO_MASK(CAP_SYS_RESOURCE);
-
-	if (capdata->permitted & CAP_TO_MASK(CAP_SYS_RESOURCE))
-		capdata->permitted &= ~CAP_TO_MASK(CAP_SYS_RESOURCE);
-
-	if (capdata->inheritable & CAP_TO_MASK(CAP_SYS_RESOURCE))
-		capdata->inheritable &= ~CAP_TO_MASK(CAP_SYS_RESOURCE);
-
-	if (capset(&caphdr, capdata) != 0)
+	ret = cap_set_flag(cap, CAP_PERMITTED,
+			   sizeof(cap_values) / sizeof(cap_values[0]),
+			   cap_values, CAP_CLEAR);
+	if (ret != 0) {
 		LogFatal(COMPONENT_INIT,
-			 "Failed to set capabilities for process, errno=%u",
-			 errno);
-	else
-		LogEvent(COMPONENT_INIT,
-			 "CAP_SYS_RESOURCE was successfully removed for proper quota management in FSAL");
+			 "cap_set_flag() failed, %s", strerror(errno));
+	}
+
+	ret = cap_set_flag(cap, CAP_INHERITABLE,
+			   sizeof(cap_values) / sizeof(cap_values[0]),
+			   cap_values, CAP_CLEAR);
+	if (ret != 0) {
+		LogFatal(COMPONENT_INIT,
+			 "cap_set_flag() failed, %s", strerror(errno));
+	}
+
+	ret = cap_set_proc(cap);
+	if (ret != 0) {
+		LogFatal(COMPONENT_INIT,
+			 "Failed to set capabilities for process, %s",
+			 strerror(errno));
+	}
+
+	LogEvent(COMPONENT_INIT,
+		 "CAP_SYS_RESOURCE was successfully removed for proper quota management in FSAL");
 
 	/* Print newly set capabilities (same as what CLI "getpcaps" displays */
-	my_cap = cap_get_proc();
-	cap_text = cap_to_text(my_cap, &capstrlen);
+	cap_text = cap_to_text(cap, &capstrlen);
 	LogEvent(COMPONENT_INIT, "currenty set capabilities are: %s",
 		 cap_text);
 	cap_free(cap_text);
-	cap_free(my_cap);
-	gsh_free(capdata);
+	cap_free(cap);
 }
 #endif
 
@@ -938,7 +908,7 @@ void nfs_start(nfs_start_info_t *p_start_info)
 			uint64_t epoch;
 		} build_verifier;
 
-		build_verifier.epoch = (uint64_t) ServerEpoch;
+		build_verifier.epoch = (uint64_t) nfs_ServerEpoch;
 
 		memcpy(NFS3_write_verifier, build_verifier.NFS3_write_verifier,
 		       sizeof(NFS3_write_verifier));
@@ -968,6 +938,9 @@ void nfs_start(nfs_start_info_t *p_start_info)
 	LogEvent(COMPONENT_INIT, "             NFS SERVER INITIALIZED");
 	LogEvent(COMPONENT_INIT,
 		 "-------------------------------------------------");
+
+	/* Set the time of NFS stat counting */
+	now(&nfs_stats_time);
 
 	/* Wait for dispatcher to exit */
 	LogDebug(COMPONENT_THREAD, "Wait for admin thread to exit");
@@ -1010,8 +983,8 @@ bool nfs_health(void)
 	uint64_t dequeue_diff, enqueue_diff;
 	bool healthy;
 
-	newenq = health.enqueued_reqs;
-	newdeq = health.dequeued_reqs;
+	newenq = nfs_health_.enqueued_reqs;
+	newdeq = nfs_health_.dequeued_reqs;
 	enqueue_diff = newenq - healthstats.enqueued_reqs;
 	dequeue_diff = newdeq - healthstats.dequeued_reqs;
 

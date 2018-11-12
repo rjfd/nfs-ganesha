@@ -1,3 +1,30 @@
+/*
+ * vim:noexpandtab:shiftwidth=8:tabstop=8:
+ *
+ * Copyright (C) Max Matveev, 2012
+ * Copyright CEA/DAM/DIF  (2008)
+ *
+ * contributeur : Philippe DENIEL   philippe.deniel@cea.fr
+ *                Thomas LEIBOVICI  thomas.leibovici@cea.fr
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3 of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
+/* Proxy handle methods */
+
 #ifndef _PXY_FSAL_METHODS_H
 #define _PXY_FSAL_METHODS_H
 
@@ -5,15 +32,31 @@
 #include "handle_mapping/handle_mapping.h"
 #endif
 
+/*512 bytes to store header*/
+#define SEND_RECV_HEADER_SPACE 512
+/*1MB of default maxsize*/
+#define DEFAULT_MAX_WRITE_READ 1048576
+
+#include <pthread.h>
+#include <dirent.h>
+#include <stdbool.h>
+
+struct pxy_fsal_module {
+	struct fsal_module module;
+	struct fsal_obj_ops handle_ops;
+};
+
+extern struct pxy_fsal_module PROXY;
+
 struct pxy_client_params {
-	unsigned int retry_sleeptime;
+	uint32_t retry_sleeptime;
 	sockaddr_t srv_addr;
-	unsigned int srv_prognum;
-	unsigned int srv_sendsize;
-	unsigned int srv_recvsize;
-	unsigned int srv_timeout;
+	uint32_t srv_prognum;
+	uint64_t srv_sendsize;
+	uint64_t srv_recvsize;
+	uint32_t srv_timeout;
 	uint16_t srv_port;
-	unsigned int use_privileged_client_port;
+	bool use_privileged_client_port;
 	char *remote_principal;
 	char *keytab;
 	unsigned int cred_lifetime;
@@ -21,27 +64,69 @@ struct pxy_client_params {
 	bool active_krb5;
 
 	/* initialization info for handle mapping */
-	int enable_handle_mapping;
+	bool enable_handle_mapping;
 
 #ifdef PROXY_HANDLE_MAPPING
 	handle_map_param_t hdlmap;
 #endif
-} proxyfs_specific_initinfo_t;
+};
 
-struct pxy_fsal_module {
-	struct fsal_module module;
-	struct fsal_staticfsinfo_t fsinfo;
-	struct pxy_client_params special;
+struct pxy_export_rpc {
+/**
+ * pxy_clientid_mutex protects pxy_clientid, pxy_client_seqid,
+ * pxy_client_sessionid, no_sessionid and cond_sessionid.
+ */
+	clientid4 pxy_clientid;
+	sequenceid4 pxy_client_seqid;
+	sessionid4 pxy_client_sessionid;
+	bool no_sessionid;
+	pthread_cond_t cond_sessionid;
+	pthread_mutex_t pxy_clientid_mutex;
+
+	char pxy_hostname[MAXNAMLEN + 1];
+	pthread_t pxy_recv_thread;
+	pthread_t pxy_renewer_thread;
+
+	/**
+	 * listlock protects rpc_sock and rpc_xid values, sockless condition and
+	 * rpc_calls list.
+	 */
+	struct glist_head rpc_calls;
+	int rpc_sock;
+	uint32_t rpc_xid;
+	pthread_mutex_t listlock;
+	pthread_cond_t sockless;
+	bool close_thread;
+
+	/*
+	 * context_lock protects free_contexts list and need_context condition.
+	 */
+	struct glist_head free_contexts;
+	pthread_cond_t need_context;
+	pthread_mutex_t context_lock;
 };
 
 struct pxy_export {
 	struct fsal_export exp;
-	struct pxy_client_params *info;
+	struct pxy_client_params info;
+	struct pxy_export_rpc rpc;
 };
+
+static inline void pxy_export_init(struct pxy_export *pxy_exp)
+{
+	pxy_exp->rpc.no_sessionid = true;
+	pthread_mutex_init(&pxy_exp->rpc.pxy_clientid_mutex, NULL);
+	pthread_cond_init(&pxy_exp->rpc.cond_sessionid, NULL);
+	pxy_exp->rpc.rpc_sock = -1;
+	pthread_mutex_init(&pxy_exp->rpc.listlock, NULL);
+	pthread_cond_init(&pxy_exp->rpc.sockless, NULL);
+	pthread_cond_init(&pxy_exp->rpc.need_context, NULL);
+	pthread_mutex_init(&pxy_exp->rpc.context_lock, NULL);
+}
 
 void pxy_handle_ops_init(struct fsal_obj_ops *ops);
 
-int pxy_init_rpc(const struct pxy_fsal_module *);
+int pxy_init_rpc(struct pxy_export *);
 
 fsal_status_t pxy_list_ext_attrs(struct fsal_obj_handle *obj_hdl,
 				 const struct req_op_context *opctx,
@@ -58,22 +143,27 @@ fsal_status_t pxy_getextattr_id_by_name(struct fsal_obj_handle *obj_hdl,
 fsal_status_t pxy_getextattr_value_by_name(struct fsal_obj_handle *obj_hdl,
 					   const struct req_op_context *opctx,
 					   const char *xattr_name,
-					   caddr_t buffer_addr,
+					   void *buffer_addr,
 					   size_t buffer_size, size_t *len);
 
 fsal_status_t pxy_getextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					 const struct req_op_context *opctx,
-					 unsigned int xattr_id, caddr_t buf,
-					 size_t sz, size_t *len);
+					 unsigned int xattr_id,
+					 void *buf,
+					 size_t sz,
+					 size_t *len);
 
 fsal_status_t pxy_setextattr_value(struct fsal_obj_handle *obj_hdl,
 				   const struct req_op_context *opctx,
-				   const char *xattr_name, caddr_t buf,
-				   size_t sz, int create);
+				   const char *xattr_name,
+				   void *buf,
+				   size_t sz,
+				   int create);
 
 fsal_status_t pxy_setextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					 const struct req_op_context *opctx,
-					 unsigned int xattr_id, caddr_t buf,
+					 unsigned int xattr_id,
+					 void *buf,
 					 size_t sz);
 
 fsal_status_t pxy_getextattr_attrs(struct fsal_obj_handle *obj_hdl,
@@ -117,6 +207,6 @@ struct state_t *pxy_alloc_state(struct fsal_export *exp_hdl,
 
 void pxy_free_state(struct fsal_export *exp_hdl, struct state_t *state);
 
-int pxy_close_thread(void);
+int pxy_close_thread(struct pxy_export *pxy_exp);
 
 #endif

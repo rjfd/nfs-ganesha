@@ -55,7 +55,8 @@ static bool proc_export(struct gsh_export *export, void *arg)
 	struct glist_head *glist_item;
 	exportlist_client_entry_t *client;
 	struct groupnode *group, *grp_tail = NULL;
-	const char *grp_name;
+	char *grp_name;
+	bool free_grp_name;
 
 	state->retval = 0;
 
@@ -98,6 +99,7 @@ static bool proc_export(struct gsh_export *export, void *arg)
 			grp_tail->gr_next = group;
 
 		grp_tail = group;
+		free_grp_name = false;
 		switch (client->type) {
 		case NETWORK_CLIENT:
 			grp_name = cidr_to_str(client->client.network.cidr,
@@ -105,6 +107,8 @@ static bool proc_export(struct gsh_export *export, void *arg)
 			if (grp_name == NULL) {
 				state->retval = errno;
 				grp_name = "Invalid Network Address";
+			} else {
+				free_grp_name = true;
 			}
 			break;
 		case NETGROUP_CLIENT:
@@ -126,6 +130,8 @@ static bool proc_export(struct gsh_export *export, void *arg)
 			     "Export %s client %s",
 			     export_path(export), grp_name);
 		group->gr_name = gsh_strdup(grp_name);
+		if (free_grp_name)
+			gsh_free(grp_name);
 	}
 
 	PTHREAD_RWLOCK_unlock(&op_ctx->ctx_export->lock);
@@ -136,6 +142,7 @@ static bool proc_export(struct gsh_export *export, void *arg)
 		state->tail->ex_next = new_expnode;
 
 	state->tail = new_expnode;
+
 	return true;
 }
 

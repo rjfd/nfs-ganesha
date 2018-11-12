@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2012, The Linux Box Corporation
- * Copyright (c) 2012-2017 Red Hat, Inc. and/or its affiliates.
+ * Copyright (c) 2012-2018 Red Hat, Inc. and/or its affiliates.
  * Contributor : Matt Benjamin <matt@linuxbox.com>
  *               William Allen Simpson <william.allen.simpson@gmail.com>
  *
@@ -62,15 +62,15 @@
 
 const struct __netid_nc_table netid_nc_table[9] = {
 	{
-	"-", 1, _NC_ERR, 0}, {
-	"tcp", 3, _NC_TCP, AF_INET}, {
-	"tcp6", 4, _NC_TCP6, AF_INET6}, {
-	"rdma", 4, _NC_RDMA, AF_INET}, {
-	"rdma6", 5, _NC_RDMA6, AF_INET6}, {
-	"sctp", 4, _NC_SCTP, AF_INET}, {
-	"sctp6", 5, _NC_SCTP6, AF_INET6}, {
-	"udp", 3, _NC_UDP, AF_INET}, {
-	"udp6", 4, _NC_UDP6, AF_INET6},};
+	"-", _NC_ERR, 0}, {
+	"tcp", _NC_TCP, AF_INET}, {
+	"tcp6", _NC_TCP6, AF_INET6}, {
+	"rdma", _NC_RDMA, AF_INET}, {
+	"rdma6", _NC_RDMA6, AF_INET6}, {
+	"sctp", _NC_SCTP, AF_INET}, {
+	"sctp6", _NC_SCTP6, AF_INET6}, {
+	"udp", _NC_UDP, AF_INET}, {
+	"udp6", _NC_UDP6, AF_INET6},};
 
 /* retry timeout default to the moon and back */
 static const struct timespec tout = { 3, 0 };
@@ -81,9 +81,9 @@ static const struct timespec tout = { 3, 0 };
  * @param[in] ccache Location of credential cache
  */
 
+#ifdef _HAVE_GSSAPI
 static inline void nfs_rpc_cb_init_ccache(const char *ccache)
 {
-#ifdef _HAVE_GSSAPI
 	int code;
 
 	if (mkdir(ccache, 0700) < 0) {
@@ -99,15 +99,16 @@ static inline void nfs_rpc_cb_init_ccache(const char *ccache)
 
 	ccachesearch[0] = nfs_param.krb5_param.ccache_dir;
 
-	code = gssd_refresh_krb5_machine_credential(
-			host_name, NULL, nfs_param.krb5_param.svc.principal);
+	code =
+		gssd_refresh_krb5_machine_credential(nfs_host_name,
+			NULL, nfs_param.krb5_param.svc.principal);
 
 	if (code)
 		LogWarn(COMPONENT_INIT,
 			"gssd_refresh_krb5_machine_credential failed (%d:%d)",
 			code, errno);
-#endif /* _HAVE_GSSAPI */
 }
+#endif /* _HAVE_GSSAPI */
 
 /**
  * @brief Initialize callback subsystem
@@ -139,8 +140,6 @@ void nfs_rpc_cb_pkgshutdown(void)
  * @todo This is automatically redundant, but in fact upstream TI-RPC is
  * not up-to-date with RFC 5665, will fix (Matt)
  *
- * @copyright 2012-2017, Linux Box Corp
- *
  * @param[in] netid The netid label dictating the protocol
  *
  * @return The numerical protocol identifier.
@@ -148,36 +147,28 @@ void nfs_rpc_cb_pkgshutdown(void)
 
 nc_type nfs_netid_to_nc(const char *netid)
 {
-	if (!strncmp(netid, netid_nc_table[_NC_TCP6].netid,
-		     netid_nc_table[_NC_TCP6].netid_len))
+	if (!strcmp(netid, netid_nc_table[_NC_TCP6].netid))
 		return _NC_TCP6;
 
-	if (!strncmp(netid, netid_nc_table[_NC_TCP].netid,
-		     netid_nc_table[_NC_TCP].netid_len))
+	if (!strcmp(netid, netid_nc_table[_NC_TCP].netid))
 		return _NC_TCP;
 
-	if (!strncmp(netid, netid_nc_table[_NC_UDP6].netid,
-		     netid_nc_table[_NC_UDP6].netid_len))
+	if (!strcmp(netid, netid_nc_table[_NC_UDP6].netid))
 		return _NC_UDP6;
 
-	if (!strncmp(netid, netid_nc_table[_NC_UDP].netid,
-		     netid_nc_table[_NC_UDP].netid_len))
+	if (!strcmp(netid, netid_nc_table[_NC_UDP].netid))
 		return _NC_UDP;
 
-	if (!strncmp(netid, netid_nc_table[_NC_RDMA6].netid,
-		     netid_nc_table[_NC_RDMA6].netid_len))
+	if (!strcmp(netid, netid_nc_table[_NC_RDMA6].netid))
 		return _NC_RDMA6;
 
-	if (!strncmp(netid, netid_nc_table[_NC_RDMA].netid,
-		     netid_nc_table[_NC_RDMA].netid_len))
+	if (!strcmp(netid, netid_nc_table[_NC_RDMA].netid))
 		return _NC_RDMA;
 
-	if (!strncmp(netid, netid_nc_table[_NC_SCTP6].netid,
-		     netid_nc_table[_NC_SCTP6].netid_len))
+	if (!strcmp(netid, netid_nc_table[_NC_SCTP6].netid))
 		return _NC_SCTP6;
 
-	if (!strncmp(netid, netid_nc_table[_NC_SCTP].netid,
-		     netid_nc_table[_NC_SCTP].netid_len))
+	if (!strcmp(netid, netid_nc_table[_NC_SCTP].netid))
 		return _NC_SCTP;
 
 	return _NC_ERR;
@@ -399,7 +390,6 @@ static inline bool supported_auth_flavor(int flavor)
 
 #ifdef _HAVE_GSSAPI
 gss_OID_desc krb5oid = { 9, "\052\206\110\206\367\022\001\002\002" };
-#endif /* _HAVE_GSSAPI */
 
 /**
  * @brief Format a principal name for an RPC call channel
@@ -450,6 +440,7 @@ static inline char *format_host_principal(rpc_call_channel_t *chan, char *buf,
 
 	return NULL;
 }
+#endif /* _HAVE_GSSAPI */
 
 /**
  * @brief Set up GSS on a callback channel
@@ -457,13 +448,14 @@ static inline char *format_host_principal(rpc_call_channel_t *chan, char *buf,
  * @param[in,out] chan Channel on which to set up GSS
  * @param[in]     cred GSS Credential
  *
- * @return	chan->auth->ah_error; check AUTH_FAILURE or AUTH_SUCCESS.
+ * @return	auth->ah_error; check AUTH_FAILURE or AUTH_SUCCESS.
  */
 
 #ifdef _HAVE_GSSAPI
-static inline void nfs_rpc_callback_setup_gss(rpc_call_channel_t *chan,
-					      nfs_client_cred_t *cred)
+static inline AUTH *nfs_rpc_callback_setup_gss(rpc_call_channel_t *chan,
+					       nfs_client_cred_t *cred)
 {
+	AUTH *result;
 	char hprinc[MAXPATHLEN + 1];
 	char *principal = nfs_param.krb5_param.svc.principal;
 	int32_t code;
@@ -476,18 +468,20 @@ static inline void nfs_rpc_callback_setup_gss(rpc_call_channel_t *chan,
 
 	/* the GSSAPI k5 mech needs to find an unexpired credential
 	 * for nfs/hostname in an accessible k5ccache */
-	code = gssd_refresh_krb5_machine_credential(host_name, NULL, principal);
+	code = gssd_refresh_krb5_machine_credential(nfs_host_name,
+						    NULL, principal);
 
 	if (code) {
 		LogWarn(COMPONENT_NFS_CB,
 			"gssd_refresh_krb5_machine_credential failed (%d:%d)",
 			code, errno);
-		return;
+		goto out_err;
 	}
 
 	if (!format_host_principal(chan, hprinc, sizeof(hprinc))) {
+		code = errno;
 		LogCrit(COMPONENT_NFS_CB, "format_host_principal failed");
-		return;
+		goto out_err;
 	}
 
 	chan->gss_sec.cred = GSS_C_NO_CREDENTIAL;
@@ -497,9 +491,19 @@ static inline void nfs_rpc_callback_setup_gss(rpc_call_channel_t *chan,
 		/* no more lipkey, spkm3 */
 		chan->gss_sec.mech = (gss_OID) & krb5oid;
 		chan->gss_sec.req_flags = GSS_C_MUTUAL_FLAG;	/* XXX */
-		chan->auth = authgss_ncreate_default(chan->clnt, hprinc,
-						     &chan->gss_sec);
+		result = authgss_ncreate_default(chan->clnt, hprinc,
+						 &chan->gss_sec);
+	} else {
+		result = authnone_ncreate();
 	}
+
+	return result;
+
+out_err:
+	result = authnone_ncreate_dummy();
+	result->ah_error.re_status = RPC_SYSTEMERROR;
+	result->ah_error.re_errno = code;
+	return result;
 }
 #endif /* _HAVE_GSSAPI */
 
@@ -575,7 +579,8 @@ int nfs_rpc_create_chan_v40(nfs_client_id_t *clientid, uint32_t flags)
 	switch (clientid->cid_credential.flavor) {
 #ifdef _HAVE_GSSAPI
 	case RPCSEC_GSS:
-		nfs_rpc_callback_setup_gss(chan, &clientid->cid_credential);
+		chan->auth = nfs_rpc_callback_setup_gss(chan,
+						&clientid->cid_credential);
 		break;
 #endif /* _HAVE_GSSAPI */
 	case AUTH_SYS:
@@ -689,8 +694,8 @@ static enum clnt_stat rpc_cb_null(rpc_call_channel_t *chan, bool locked)
  * @return 0 or POSIX error code.
  */
 
-int nfs_rpc_create_chan_v41(nfs41_session_t *session, int num_sec_parms,
-			    callback_sec_parms4 *sec_parms)
+int nfs_rpc_create_chan_v41(SVCXPRT *xprt, nfs41_session_t *session,
+			    int num_sec_parms, callback_sec_parms4 *sec_parms)
 {
 	rpc_call_channel_t *chan = &session->cb_chan;
 	char *err;
@@ -709,9 +714,9 @@ int nfs_rpc_create_chan_v41(nfs41_session_t *session, int num_sec_parms,
 	chan->type = RPC_CHAN_V41;
 	chan->source.session = session;
 
-	assert(session->xprt);
+	assert(xprt);
 
-	if (svc_get_xprt_type(session->xprt) == XPRT_RDMA) {
+	if (svc_get_xprt_type(xprt) == XPRT_RDMA) {
 		LogWarn(COMPONENT_NFS_CB,
 			"refusing to create back channel over RDMA for now");
 		code = EINVAL;
@@ -721,7 +726,7 @@ int nfs_rpc_create_chan_v41(nfs41_session_t *session, int num_sec_parms,
 	/* connect an RPC client
 	 * Use version 1 per errata ID 2291 for RFC 5661
 	 */
-	chan->clnt = clnt_vc_ncreate_svc(session->xprt, session->cb_program,
+	chan->clnt = clnt_vc_ncreate_svc(xprt, session->cb_program,
 					 NFS_CB /* Errata ID: 2291 */,
 					 CLNT_CREATE_FLAG_NONE);
 
@@ -822,8 +827,11 @@ rpc_call_channel_t *nfs_rpc_get_chan(nfs_client_id_t *clientid, uint32_t flags)
 
 	if (clientid->cid_minorversion == 0) {
 		chan = &clientid->cid_cb.v40.cb_chan;
-		if (!chan->clnt)
-			(void)nfs_rpc_create_chan_v40(clientid, flags);
+		if (!chan->clnt) {
+			if (!nfs_rpc_create_chan_v40(clientid, flags)) {
+				chan = NULL;
+			}
+		}
 		return chan;
 	}
 
@@ -888,9 +896,9 @@ static inline void free_resop(nfs_cb_resop4 *op)
 
 rpc_call_t *alloc_rpc_call(void)
 {
-	request_data_t *reqdata = pool_alloc(request_pool);
+	request_data_t *reqdata = pool_alloc(nfs_request_pool);
 
-	(void) atomic_inc_uint64_t(&health.enqueued_reqs);
+	(void) atomic_inc_uint64_t(&nfs_health_.enqueued_reqs);
 
 	reqdata->rtype = NFS_CALL;
 	return &reqdata->r_u.call;
@@ -919,8 +927,8 @@ static void nfs_rpc_call_free(struct clnt_req *cc, size_t unused)
 	rpc_call_t *call = container_of(cc, rpc_call_t, call_req);
 	request_data_t *reqdata = container_of(call, request_data_t, r_u.call);
 
-	pool_free(request_pool, reqdata);
-	(void) atomic_inc_uint64_t(&health.dequeued_reqs);
+	pool_free(nfs_request_pool, reqdata);
+	(void) atomic_inc_uint64_t(&nfs_health_.dequeued_reqs);
 }
 
 /**
@@ -1057,10 +1065,8 @@ static rpc_call_t *construct_v41(nfs41_session_t *session,
 
 		ref_call = gsh_malloc(sizeof(referring_call4));
 
-		sequence->csa_referring_call_lists.csa_referring_call_lists_len
-			= 1;
-		sequence->csa_referring_call_lists.csa_referring_call_lists_val
-			= list;
+		sequence->csa_referring_call_lists.csarcl_len = 1;
+		sequence->csa_referring_call_lists.csarcl_val = list;
 		memcpy(list->rcl_sessionid, refer->session,
 		       sizeof(NFS4_SESSIONID_SIZE));
 		list->rcl_referring_calls.rcl_referring_calls_len = 1;
@@ -1068,10 +1074,8 @@ static rpc_call_t *construct_v41(nfs41_session_t *session,
 		ref_call->rc_sequenceid = refer->sequence;
 		ref_call->rc_slotid = refer->slot;
 	} else {
-		sequence->csa_referring_call_lists.csa_referring_call_lists_len
-			= 0;
-		sequence->csa_referring_call_lists.csa_referring_call_lists_val
-			= NULL;
+		sequence->csa_referring_call_lists.csarcl_len = 0;
+		sequence->csa_referring_call_lists.csarcl_val = NULL;
 	}
 	cb_compound_add_op(&call->cbt, &sequenceop);
 	cb_compound_add_op(&call->cbt, op);
@@ -1091,7 +1095,7 @@ static void release_v41(rpc_call_t *call)
 	CB_SEQUENCE4args *sequence =
 		&argarray_val[0].nfs_cb_argop4_u.opcbsequence;
 	referring_call_list4 *call_lists =
-		sequence->csa_referring_call_lists.csa_referring_call_lists_val;
+		sequence->csa_referring_call_lists.csarcl_val;
 
 	if (call_lists == NULL)
 		return;
@@ -1311,6 +1315,12 @@ enum clnt_stat nfs_test_cb_chan(nfs_client_id_t *clientid)
 			return RPC_SYSTEMERROR;
 		}
 
+		if (!chan->auth) {
+			LogCrit(COMPONENT_NFS_CB,
+				"nfs_rpc_get_chan failed (no auth)");
+			return RPC_SYSTEMERROR;
+		}
+
 		/* try the CB_NULL proc -- inline here, should be ok-ish */
 		stat = rpc_cb_null(chan, false);
 		LogDebug(COMPONENT_NFS_CB,
@@ -1347,6 +1357,11 @@ static int nfs_rpc_v40_single(nfs_client_id_t *clientid, nfs_cb_argop4 *op,
 	}
 	if (!chan->clnt) {
 		LogCrit(COMPONENT_NFS_CB, "nfs_rpc_get_chan failed (no clnt)");
+		set_cb_chan_down(clientid, true);
+		return ENOTCONN;
+	}
+	if (!chan->auth) {
+		LogCrit(COMPONENT_NFS_CB, "nfs_rpc_get_chan failed (no auth)");
 		set_cb_chan_down(clientid, true);
 		return ENOTCONN;
 	}

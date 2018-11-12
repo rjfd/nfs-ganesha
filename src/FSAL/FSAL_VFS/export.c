@@ -56,8 +56,6 @@
 /* helpers to/from other VFS objects
  */
 
-struct fsal_staticfsinfo_t *vfs_staticinfo(struct fsal_module *hdl);
-
 int vfs_get_root_fd(struct fsal_export *exp_hdl)
 {
 	struct vfs_fsal_export *myself;
@@ -137,103 +135,6 @@ static fsal_status_t get_dynamic_info(struct fsal_export *exp_hdl,
 	return fsalstat(fsal_error, retval);
 }
 
-static bool fs_supports(struct fsal_export *exp_hdl,
-			fsal_fsinfo_options_t option)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_supports(info, option);
-}
-
-static uint64_t fs_maxfilesize(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxfilesize(info);
-}
-
-static uint32_t fs_maxread(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxread(info);
-}
-
-static uint32_t fs_maxwrite(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxwrite(info);
-}
-
-static uint32_t fs_maxlink(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxlink(info);
-}
-
-static uint32_t fs_maxnamelen(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxnamelen(info);
-}
-
-static uint32_t fs_maxpathlen(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_maxpathlen(info);
-}
-
-static struct timespec fs_lease_time(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_lease_time(info);
-}
-
-static fsal_aclsupp_t fs_acl_support(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_acl_support(info);
-}
-
-static attrmask_t fs_supported_attrs(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_supported_attrs(info);
-}
-
-static uint32_t fs_umask(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_umask(info);
-}
-
-static uint32_t fs_xattr_access_rights(struct fsal_export *exp_hdl)
-{
-	struct fsal_staticfsinfo_t *info;
-
-	info = vfs_staticinfo(exp_hdl->fsal);
-	return fsal_xattr_access_rights(info);
-}
-
 /* get_quota
  * return quotas for this export.
  * path could cross a lower mount boundary which could
@@ -265,12 +166,17 @@ static fsal_status_t get_quota(struct fsal_export *exp_hdl,
 
 	memset((char *)&fs_quota, 0, sizeof(struct dqblk));
 
-	fsal_set_credentials(op_ctx->creds);
+	if (!vfs_set_credentials(op_ctx->creds, exp_hdl->fsal)) {
+		fsal_error = ERR_FSAL_PERM;
+		retval = EPERM;
+		goto out;
+	}
+
 	/** @todo need to get the right file system... */
 	retval = QUOTACTL(QCMD(Q_GETQUOTA, quota_type), myself->root_fs->device,
 			  quota_id, (caddr_t) &fs_quota);
 	errsv = errno;
-	fsal_restore_ganesha_credentials();
+	vfs_restore_ganesha_credentials(exp_hdl->fsal);
 
 	if (retval < 0) {
 		fsal_error = posix2fsal_error(errsv);
@@ -341,12 +247,17 @@ static fsal_status_t set_quota(struct fsal_export *exp_hdl,
 		fs_quota.dqb_valid |= QIF_ITIME;
 #endif
 
-	fsal_set_credentials(op_ctx->creds);
+	if (!vfs_set_credentials(op_ctx->creds, exp_hdl->fsal)) {
+		fsal_error = ERR_FSAL_PERM;
+		retval = EPERM;
+		goto err;
+	}
+
 	/** @todo need to get the right file system... */
 	retval = QUOTACTL(QCMD(Q_SETQUOTA, quota_type), myself->root_fs->device,
 			  quota_id, (caddr_t) &fs_quota);
 	errsv = errno;
-	fsal_restore_ganesha_credentials();
+	vfs_restore_ganesha_credentials(exp_hdl->fsal);
 
 	if (retval < 0) {
 		fsal_error = posix2fsal_error(errsv);
@@ -399,18 +310,6 @@ void vfs_export_ops_init(struct export_ops *ops)
 	ops->wire_to_host = wire_to_host;
 	ops->create_handle = vfs_create_handle;
 	ops->get_fs_dynamic_info = get_dynamic_info;
-	ops->fs_supports = fs_supports;
-	ops->fs_maxfilesize = fs_maxfilesize;
-	ops->fs_maxread = fs_maxread;
-	ops->fs_maxwrite = fs_maxwrite;
-	ops->fs_maxlink = fs_maxlink;
-	ops->fs_maxnamelen = fs_maxnamelen;
-	ops->fs_maxpathlen = fs_maxpathlen;
-	ops->fs_lease_time = fs_lease_time;
-	ops->fs_acl_support = fs_acl_support;
-	ops->fs_supported_attrs = fs_supported_attrs;
-	ops->fs_umask = fs_umask;
-	ops->fs_xattr_access_rights = fs_xattr_access_rights;
 	ops->get_quota = get_quota;
 	ops->set_quota = set_quota;
 	ops->alloc_state = vfs_alloc_state;

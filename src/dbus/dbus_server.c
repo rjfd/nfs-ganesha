@@ -35,8 +35,6 @@
 #include <assert.h>
 #include "gsh_list.h"
 
-#include <sys/epoll.h>
-#include <sys/timerfd.h>
 #include <errno.h>
 #include <dbus/dbus.h>
 #include <ctype.h>
@@ -706,8 +704,9 @@ void gsh_dbus_pkgshutdown(void)
 				      &thread_state.dbus_err);
 		if (dbus_error_is_set(&thread_state.dbus_err)) {
 			LogCrit(COMPONENT_DBUS, "err releasing name (%s, %s)",
-				handler->name, thread_state.dbus_err.message);
-				dbus_error_free(&thread_state.dbus_err);
+				prefixed_dbus_name,
+				thread_state.dbus_err.message);
+			dbus_error_free(&thread_state.dbus_err);
 		}
 
 		/*
@@ -883,7 +882,7 @@ bool arg_9p_op(DBusMessageIter *args, u8 *opcode, char **errormsg)
 		dbus_message_iter_get_basic(args, &opname);
 		for (opc = _9P_TSTATFS; opc <= _9P_TWSTAT; opc++) {
 			if (_9pfuncdesc[opc].funcname != NULL &&
-			    !strncmp(opname, _9pfuncdesc[opc].funcname, 16))
+			    !strcmp(opname, _9pfuncdesc[opc].funcname))
 				break;
 		}
 		if (opc > _9P_TWSTAT) {

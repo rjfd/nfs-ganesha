@@ -65,10 +65,25 @@ void free_export_ops(struct fsal_export *exp_hdl);
 /* fsal_obj_handle common methods
  */
 
+void fsal_default_obj_ops_init(struct fsal_obj_ops *obj_ops);
 void fsal_obj_handle_init(struct fsal_obj_handle *, struct fsal_export *,
 			  object_file_type_t);
 
 void fsal_obj_handle_fini(struct fsal_obj_handle *obj);
+
+/**
+ * @brief Test handle type
+ *
+ * This function tests that a handle is of the specified type.
+ *
+ * @retval true if it is.
+ * @retval false if it isn't.
+ */
+static inline bool fsal_obj_handle_is(struct fsal_obj_handle *obj_hdl,
+					object_file_type_t type)
+{
+	return obj_hdl->type == type;
+}
 
 /*
  * pNFS DS Helpers
@@ -246,4 +261,6 @@ bool check_verifier_stat(struct stat *st, fsal_verifier_t verifier);
 
 bool check_verifier_attrlist(struct attrlist *attrs, fsal_verifier_t verifier);
 
+bool fsal_common_is_referral(struct fsal_obj_handle *obj_hdl,
+			     struct attrlist *attrs, bool cache_attrs);
 #endif				/* FSAL_COMMONLIB_H */

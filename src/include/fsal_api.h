@@ -223,7 +223,7 @@ struct state_t;
  *
  * The invariant to be maintained is that given an @c fsal_obj_handle,
  * obj_hdl, exp_ops.host_to_key(wire_to_host(handle_to_wire(obj_hdl)))
- * is equal to obj_ops.handle_to_key(obj_hdl).
+ * is equal to obj_ops->handle_to_key(obj_hdl).
  *
  * History and Details
  * ===================
@@ -303,14 +303,9 @@ struct state_t;
  *
  * Increment this whenever any part of the existing API is changed,
  * e.g.  the argument list changed or a method is removed.
- *
- * This has been bumped to 5.0 even though the old non-support_ex API
- * still exists. This is because we expect all FSALs to convert to the
- * new API. The old API will be removed early in the V2.6 development
- * cycle at which point we will move to 6.0.
  */
 
-#define FSAL_MAJOR_VERSION 7
+#define FSAL_MAJOR_VERSION 8
 
 /**
  * @brief Minor Version
@@ -672,6 +667,14 @@ struct export_ops {
 */
 
 /**
+ * @brief Prepare an export to be unexported
+ *
+ * This function is called prior to unexporting an export. It should do any
+ * preparation that the export requires prior to being removed.
+ */
+	 void (*prepare_unexport)(struct fsal_export *exp_hdl);
+
+/**
  * @brief Clean up an export when it's unexported
  *
  * This function is called when the export is unexported.  It should release any
@@ -920,18 +923,6 @@ struct export_ops {
 	 uint32_t (*fs_maxpathlen)(struct fsal_export *exp_hdl);
 
 /**
- * @brief Get the lease time for this filesystem
- *
- * @note Currently this value has no effect, with lease time being
- * configured globally for all filesystems at once.
- *
- * @param[in] exp_hdl Filesystem to interrogate
- *
- * @return Lease time.
- */
-	struct timespec (*fs_lease_time)(struct fsal_export *exp_hdl);
-
-/**
  * @brief Get supported ACL types
  *
  * This function returns a bitmask indicating whether it supports
@@ -974,20 +965,6 @@ struct export_ops {
  * @return creation umask.
  */
 	 uint32_t (*fs_umask)(struct fsal_export *exp_hdl);
-
-/**
- * @brief Get permissions applied to names attributes
- *
- * @note This doesn't make sense to me as an export-level parameter.
- * Permissions on named attributes could reasonably vary with
- * permission and ownership of the associated file, and some
- * attributes may be read/write while others are read-only. -- ACE
- *
- * @param[in] exp_hdl Filesystem to interrogate
- *
- * @return permissions on named attributes.
- */
-	 uint32_t (*fs_xattr_access_rights)(struct fsal_export *exp_hdl);
 /**@}*/
 
 /**@{*/
@@ -1201,6 +1178,9 @@ struct export_ops {
  * @brief Filesystem operations
  */
 
+typedef void (*fsal_async_cb)(struct fsal_obj_handle *obj, fsal_status_t ret,
+			      void *obj_data, void *caller_data);
+
 typedef int (*claim_filesystem_cb)(struct fsal_filesystem *fs,
 				   struct fsal_export *exp);
 
@@ -1294,6 +1274,24 @@ typedef enum fsal_dir_result (*fsal_readdir_cb)(
 				const char *name, struct fsal_obj_handle *obj,
 				struct attrlist *attrs,
 				void *dir_state, fsal_cookie_t cookie);
+
+/**
+ * @brief Argument for read2/write2 and their callbacks
+ *
+ */
+struct fsal_io_arg {
+	size_t io_amount;	/**< Total amount of I/O actually done */
+	struct io_info *info;	/**< More information about data */
+	union {
+		bool end_of_file;	/**< True if end-of-file reached */
+		bool fsal_stable;	/**< requested/achieved stability */
+	};
+	struct state_t *state;	/**< State to use for read (or NULL) */
+	uint64_t offset;	/**< Offset into file to read */
+	int iov_count;		/**< Number of vectors in iov */
+	struct iovec iov[];	/**< Vector of buffers to fill */
+};
+
 /**
  * @brief FSAL object operations vector
  */
@@ -1698,19 +1696,6 @@ struct fsal_obj_ops {
 			       const char *name);
 
 /**
- * @brief get fs_locations
- *
- * This function returns the fs locations for an object.
- *
- * @param[in] obj_hdl        Object to get fs locations for
- * @param[out] fs_locations4 fs locations
- *
- * @return FSAL status
- */
-	 fsal_status_t (*fs_locations)(struct fsal_obj_handle *obj_hdl,
-				       struct fs_locations4 *fs_locs);
-
-/**
  * @brief Rename a file
  *
  * This function renames a file (technically it changes the name of
@@ -1788,6 +1773,21 @@ struct fsal_obj_ops {
  * @return FSAL status.
  */
 	 fsal_status_t (*close)(struct fsal_obj_handle *obj_hdl);
+
+/**
+ * @brief Reserve/Deallocate space in a region of a file
+ *
+ * @param[in] obj_hdl File to which bytes should be allocated
+ * @param[in] state   open stateid under which to do the allocation
+ * @param[in] offset  offset at which to begin the allocation
+ * @param[in] length  length of the data to be allocated
+ * @param[in] allocate Should space be allocated or deallocated?
+ *
+ * @return FSAL status.
+ */
+	 fsal_status_t (*fallocate)(struct fsal_obj_handle *obj_hdl,
+				    struct state_t *state, uint64_t offset,
+				    uint64_t length, bool allocate);
 /**@}*/
 
 /**@{*/
@@ -1856,7 +1856,7 @@ struct fsal_obj_ops {
 	 fsal_status_t (*getextattr_value_by_name)(struct fsal_obj_handle *
 						   obj_hdl,
 						   const char *xattr_name,
-						   caddr_t buffer_addr,
+						   void *buffer_addr,
 						   size_t buffer_size,
 						   size_t *output_size);
 
@@ -1877,7 +1877,7 @@ struct fsal_obj_ops {
 	 fsal_status_t (*getextattr_value_by_id)(struct fsal_obj_handle *
 						 obj_hdl,
 						 unsigned int xattr_id,
-						 caddr_t buffer_addr,
+						 void *buffer_addr,
 						 size_t buffer_size,
 						 size_t *output_size);
 
@@ -1896,7 +1896,7 @@ struct fsal_obj_ops {
  */
 	 fsal_status_t (*setextattr_value)(struct fsal_obj_handle *obj_hdl,
 					   const char *xattr_name,
-					   caddr_t buffer_addr,
+					   void *buffer_addr,
 					   size_t buffer_size, int create);
 
 /**
@@ -1914,7 +1914,7 @@ struct fsal_obj_ops {
 	 fsal_status_t (*setextattr_value_by_id)(struct fsal_obj_handle *
 						 obj_hdl,
 						 unsigned int xattr_id,
-						 caddr_t buffer_addr,
+						 void *buffer_addr,
 						 size_t buffer_size);
 
 /**
@@ -1949,17 +1949,6 @@ struct fsal_obj_ops {
 /**
  * Handle operations
  */
-
-/**
- * @brief Test handle type
- *
- * This function tests that a handle is of the specified type.
- *
- * @retval true if it is.
- * @retval false if it isn't.
- */
-	 bool (*handle_is)(struct fsal_obj_handle *obj_hdl,
-			   object_file_type_t type);
 
 /**
  * @brief Write wire handle
@@ -2310,30 +2299,24 @@ struct fsal_obj_ops {
  *
  * This function reads data from the given file. The FSAL must be able to
  * perform the read whether a state is presented or not. This function also
- * is expected to handle properly bypassing or not share reservations.
+ * is expected to handle properly bypassing or not share reservations.  This is
+ * an (optionally) asynchronous call.  When the I/O is complete, the done
+ * callback is called with the results.
  *
- * @param[in]     obj_hdl        File on which to operate
- * @param[in]     bypass         If state doesn't indicate a share reservation,
- *                               bypass any deny read
- * @param[in]     state          state_t to use for this operation
- * @param[in]     offset         Position from which to read
- * @param[in]     buffer_size    Amount of data to read
- * @param[out]    buffer         Buffer to which data are to be copied
- * @param[out]    read_amount    Amount of data read
- * @param[out]    end_of_file    true if the end of file has been reached
- * @param[in,out] info           more information about the data
+ * @param[in]     obj_hdl	File on which to operate
+ * @param[in]     bypass	If state doesn't indicate a share reservation,
+ *				bypass any deny read
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] read_arg	Info about read, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
  *
- * @return FSAL status.
+ * @return Nothing; results are in callback
  */
-	 fsal_status_t (*read2)(struct fsal_obj_handle *obj_hdl,
-				bool bypass,
-				struct state_t *state,
-				uint64_t offset,
-				size_t buffer_size,
-				void *buffer,
-				size_t *read_amount,
-				bool *end_of_file,
-				struct io_info *info);
+	 void (*read2)(struct fsal_obj_handle *obj_hdl,
+		       bool bypass,
+		       fsal_async_cb done_cb,
+		       struct fsal_io_arg *read_arg,
+		       void *caller_arg);
 
 /**
  * @brief Write data to a file
@@ -2346,29 +2329,21 @@ struct fsal_obj_ops {
  *
  * The FSAL is expected to enforce sync if necessary.
  *
- * @param[in]     obj_hdl        File on which to operate
- * @param[in]     bypass         If state doesn't indicate a share reservation,
- *                               bypass any non-mandatory deny write
- * @param[in]     state          state_t to use for this operation
- * @param[in]     offset         Position at which to write
- * @param[in]     buffer_size    Amount of data to write
- * @param[in]     buffer         Data to be written
- * @param[in,out] fsal_stable    In, if on, the fsal is requested to write data
- *                               to stable store. Out, the fsal reports what
- *                               it did.
- * @param[in,out] info           more information about the data
+ * This is an (optionally) asynchronous call.  When the I/O is complete, the @a
+ * done_cb callback is called.
  *
- * @return FSAL status.
+ * @param[in]     obj_hdl       File on which to operate
+ * @param[in]     bypass        If state doesn't indicate a share reservation,
+ *                              bypass any non-mandatory deny write
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] write_arg	Info about write, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
  */
-	 fsal_status_t (*write2)(struct fsal_obj_handle *obj_hdl,
-				 bool bypass,
-				 struct state_t *state,
-				 uint64_t offset,
-				 size_t buffer_size,
-				 void *buffer,
-				 size_t *wrote_amount,
-				 bool *fsal_stable,
-				 struct io_info *info);
+	 void (*write2)(struct fsal_obj_handle *obj_hdl,
+			bool bypass,
+			fsal_async_cb done_cb,
+			struct fsal_io_arg *write_arg,
+			void *caller_arg);
 
 /**
  * @brief Seek to data or hole
@@ -2500,6 +2475,32 @@ struct fsal_obj_ops {
  */
 	 fsal_status_t (*close2)(struct fsal_obj_handle *obj_hdl,
 				 struct state_t *state);
+
+/**@}*/
+
+/**
+ * @brief Determine if the given handle is a referral point
+ *
+ * @param[in]	  obj_hdl	Handle on which to operate
+ * @param[in|out] attrs		Attributes of the handle
+ * @param[in]	  cache_attrs	Cache the received attrs
+ *
+ * @return true if it is a referral point, false otherwise
+ */
+
+	 bool (*is_referral)(struct fsal_obj_handle *obj_hdl,
+			     struct attrlist *attrs,
+			     bool cache_attrs);
+
+/**@{*/
+
+/**
+ * ASYNC API functions.
+ *
+ * These are asyncronous versions of some of the API functions.  FSALs are
+ * expected to implement these, but the upper layers are not expected to call
+ * them.  Instead, they will be called by MDCACHE at the appropriate points.
+ */
 
 /**@}*/
 };
@@ -2778,6 +2779,7 @@ struct fsal_module {
 					    manipulating its lists (above). */
 	int32_t refcount;		/*< Reference count */
 	struct fsal_stats *stats;   /*< for storing the FSAL specific stats */
+	struct fsal_staticfsinfo_t fs_info; /*< for storing FSAL static info */
 };
 
 /**
@@ -2897,21 +2899,9 @@ struct fsal_obj_handle {
 					   the same FSAL. */
 	struct fsal_filesystem *fs;	/*< Owning filesystem */
 	struct fsal_module *fsal;	/*< Link back to fsal module */
-	struct fsal_obj_ops obj_ops;	/*< Operations vector */
+	struct fsal_obj_ops *obj_ops;	/*< Operations vector */
 
 	pthread_rwlock_t obj_lock;		/*< Lock on handle */
-
-	/** Pointer to the cached attributes.
-	 *
-	 * This pointer should be set by the fsal when the handle is created.
-	 * Its value should not be changed once initialized. The release
-	 * of this field is also done by the FSAL.
-	 *
-	 * Typically the attributes are part of the FSAL's private handle,
-	 * however, some FSALs, particularly stackable FSALs may point to
-	 * some other field (for example, the underlying FSAL's attributes
-	 * in the case of FSAL_NULL).
-	 */
 
 	/* Static attributes */
 	object_file_type_t type;	/*< Object file type */

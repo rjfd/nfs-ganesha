@@ -238,7 +238,6 @@ typedef enum rfc_5665_nc_type nc_type;
 
 struct __netid_nc_table {
 	const char *netid;
-	int netid_len;
 	/* nc_type */
 	const nc_type nc;
 	int af;
@@ -312,19 +311,27 @@ typedef struct compound_data {
 	nfs_client_cred_t credential;	/*< Raw RPC credentials */
 	nfs_client_id_t *preserved_clientid;	/*< clientid that has lease
 						   reserved, if any */
-	struct COMPOUND4res_extended *cached_res;	/*< NFv41: pointer to
+	struct COMPOUND4res_extended *cached_result;	/*< NFv41: pointer to
 							   cached RPC result in
 							   a session's slot */
-	bool use_drc;		/*< Set to true if session DRC is to be used */
+	bool use_slot_cached_result;	/*< Set to true if session DRC is to be
+					    used */
+	bool sa_cachethis;	/*< True if cachethis was specified in
+				    SEQUENCE op. */
 	uint32_t oppos;		/*< Position of the operation within the
 				    request processed  */
+	const char *opname;	/*< Name of the operation */
 	nfs41_session_t *session;	/*< Related session
 					   (found by OP_SEQUENCE) */
 	sequenceid4 sequence;	/*< Sequence ID of the current compound
 				   (if applicable) */
 	slotid4 slot;		/*< Slot ID of the current compound
 				   (if applicable) */
+	uint32_t resp_size;	/*< Running total response size. */
+	uint32_t op_resp_size;	/*< Current op's response size. */
 } compound_data_t;
+
+#define VARIABLE_RESP_SIZE (0)
 
 typedef int (*nfs4_op_function_t) (struct nfs_argop4 *, compound_data_t *,
 				   struct nfs_resop4 *);
@@ -353,7 +360,7 @@ static inline void set_current_entry(compound_data_t *data,
 
 	if (data->current_obj) {
 		/* Release ref on old object */
-		data->current_obj->obj_ops.put_ref(data->current_obj);
+		data->current_obj->obj_ops->put_ref(data->current_obj);
 	}
 
 	data->current_obj = obj;
@@ -364,7 +371,7 @@ static inline void set_current_entry(compound_data_t *data,
 	}
 
 	/* Get our ref on the new object */
-	data->current_obj->obj_ops.get_ref(data->current_obj);
+	data->current_obj->obj_ops->get_ref(data->current_obj);
 
 	/* Set the current file type */
 	data->current_filetype = obj->type;
@@ -408,7 +415,7 @@ static inline void set_saved_entry(compound_data_t *data,
 
 	if (data->saved_obj) {
 		/* Release ref on old object */
-		data->saved_obj->obj_ops.put_ref(data->saved_obj);
+		data->saved_obj->obj_ops->put_ref(data->saved_obj);
 	}
 
 	if (restore_op_ctx) {
@@ -428,7 +435,7 @@ static inline void set_saved_entry(compound_data_t *data,
 	}
 
 	/* Get our ref on the new object */
-	data->saved_obj->obj_ops.get_ref(data->saved_obj);
+	data->saved_obj->obj_ops->get_ref(data->saved_obj);
 
 	/* Set the saved file type */
 	data->saved_filetype = obj->type;

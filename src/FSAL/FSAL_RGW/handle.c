@@ -136,7 +136,7 @@ struct rgw_cb_arg {
 static bool rgw_cb(const char *name, void *arg, uint64_t offset, uint32_t flags)
 {
 	struct rgw_cb_arg *rgw_cb_arg = arg;
-	struct fsal_obj_handle *obj;
+	struct fsal_obj_handle *obj = NULL;
 	fsal_status_t status;
 	struct attrlist attrs;
 	enum fsal_dir_result cb_rc;
@@ -871,7 +871,7 @@ fsal_status_t rgw_fsal_open2(struct fsal_obj_handle *obj_hdl,
 				 */
 				if (createmode >= FSAL_EXCLUSIVE &&
 					createmode != FSAL_EXCLUSIVE_9P &&
-					!obj_hdl->obj_ops.check_verifier(
+					!obj_hdl->obj_ops->check_verifier(
 						obj_hdl, verifier)) {
 					/* Verifier didn't match */
 					status =
@@ -943,7 +943,7 @@ fsal_status_t rgw_fsal_open2(struct fsal_obj_handle *obj_hdl,
 		struct fsal_obj_handle *temp = NULL;
 
 		/* We don't have open by name... */
-		status = obj_hdl->obj_ops.lookup(obj_hdl, name, &temp, NULL);
+		status = obj_hdl->obj_ops->lookup(obj_hdl, name, &temp, NULL);
 
 		if (FSAL_IS_ERROR(status)) {
 			LogFullDebug(COMPONENT_FSAL,
@@ -953,7 +953,7 @@ fsal_status_t rgw_fsal_open2(struct fsal_obj_handle *obj_hdl,
 		}
 
 		/* Now call ourselves without name and attributes to open. */
-		status = obj_hdl->obj_ops.open2(temp, state, openflags,
+		status = obj_hdl->obj_ops->open2(temp, state, openflags,
 						FSAL_NO_CREATE, NULL, NULL,
 						verifier, new_obj,
 						attrs_out,
@@ -961,7 +961,7 @@ fsal_status_t rgw_fsal_open2(struct fsal_obj_handle *obj_hdl,
 
 		if (FSAL_IS_ERROR(status)) {
 			/* Release the object we found by lookup. */
-			temp->obj_ops.release(temp);
+			temp->obj_ops->release(temp);
 			LogFullDebug(COMPONENT_FSAL,
 				     "open returned %s",
 				     fsal_err_txt(status));
@@ -1078,7 +1078,7 @@ fsal_status_t rgw_fsal_open2(struct fsal_obj_handle *obj_hdl,
 		 * Note that we only set the attributes if we were responsible
 		 * for creating the file.
 		 */
-		status = (*new_obj)->obj_ops.setattr2(*new_obj,
+		status = (*new_obj)->obj_ops->setattr2(*new_obj,
 						      false,
 						      state,
 						      attrib_set);
@@ -1087,7 +1087,7 @@ fsal_status_t rgw_fsal_open2(struct fsal_obj_handle *obj_hdl,
 			goto fileerr;
 
 		if (attrs_out != NULL) {
-			status = (*new_obj)->obj_ops.getattrs(*new_obj,
+			status = (*new_obj)->obj_ops->getattrs(*new_obj,
 							      attrs_out);
 			if (FSAL_IS_ERROR(status) &&
 			    (attrs_out->request_mask & ATTR_RDATTR_ERR) == 0) {
@@ -1136,7 +1136,7 @@ fsal_status_t rgw_fsal_open2(struct fsal_obj_handle *obj_hdl,
 	}
 
 	/* Release the handle we just allocated. */
-	(*new_obj)->obj_ops.release(*new_obj);
+	(*new_obj)->obj_ops->release(*new_obj);
 	*new_obj = NULL;
 
 	return status;
@@ -1266,59 +1266,68 @@ fsal_status_t rgw_fsal_reopen2(struct fsal_obj_handle *obj_hdl,
  *
  * This function reads data from the given file. The FSAL must be able to
  * perform the read whether a state is presented or not. This function also
- * is expected to handle properly bypassing or not share reservations.
+ * is expected to handle properly bypassing or not share reservations.  This is
+ * an (optionally) asynchronous call.  When the I/O is complete, the done
+ * callback is called with the results.
  *
- * @param[in]     obj_hdl        File on which to operate
- * @param[in]     bypass         If state doesn't indicate a share reservation,
- *                               bypass any deny read
- * @param[in]     state          state_t to use for this operation
- * @param[in]     offset         Position from which to read
- * @param[in]     buffer_size    Amount of data to read
- * @param[out]    buffer         Buffer to which data are to be copied
- * @param[out]    read_amount    Amount of data read
- * @param[out]    end_of_file    true if the end of file has been reached
- * @param[in,out] info           more information about the data
+ * @param[in]     obj_hdl	File on which to operate
+ * @param[in]     bypass	If state doesn't indicate a share reservation,
+ *				bypass any deny read
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] read_arg	Info about read, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
  *
- * @return FSAL status.
+ * @return Nothing; results are in callback
  */
 
-fsal_status_t rgw_fsal_read2(struct fsal_obj_handle *obj_hdl,
-			bool bypass,
-			struct state_t *state,
-			uint64_t offset,
-			size_t buffer_size,
-			void *buffer,
-			size_t *read_amount,
-			bool *end_of_file,
-			struct io_info *info)
+void rgw_fsal_read2(struct fsal_obj_handle *obj_hdl,
+		    bool bypass,
+		    fsal_async_cb done_cb,
+		    struct fsal_io_arg *read_arg,
+		    void *caller_arg)
 {
 	struct rgw_export *export =
 	    container_of(op_ctx->fsal_export, struct rgw_export, export);
 
 	struct rgw_handle *handle = container_of(obj_hdl, struct rgw_handle,
 						 handle);
+	uint64_t offset = read_arg->offset;
+	int i;
 
 	LogFullDebug(COMPONENT_FSAL,
-		"%s enter obj_hdl %p state %p", __func__, obj_hdl, state);
+		"%s enter obj_hdl %p state %p", __func__, obj_hdl,
+		read_arg->state);
 
-	if (info != NULL) {
+	if (read_arg->info != NULL) {
 		/* Currently we don't support READ_PLUS */
-		return fsalstat(ERR_FSAL_NOTSUPP, 0);
+		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), read_arg,
+			caller_arg);
+		return;
 	}
 
 	/* RGW does not support a file descriptor abstraction--so
 	 * reads are handle based */
 
-	int rc = rgw_read(export->rgw_fs, handle->rgw_fh, offset,
-			buffer_size, read_amount, buffer,
-			RGW_READ_FLAG_NONE);
+	for (i = 0; i < read_arg->iov_count; i++) {
+		size_t nb_read;
+		int rc = rgw_read(export->rgw_fs, handle->rgw_fh, offset,
+				  read_arg->iov[i].iov_len, &nb_read,
+				  read_arg->iov[i].iov_base,
+				  RGW_READ_FLAG_NONE);
 
-	if (rc < 0)
-		return rgw2fsal_error(rc);
+		if (rc < 0) {
+			done_cb(obj_hdl, rgw2fsal_error(rc), read_arg,
+				caller_arg);
+			return;
+		}
 
-	*end_of_file = (read_amount == 0);
+		read_arg->io_amount += nb_read;
+		offset += nb_read;
+	}
 
-	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+	read_arg->end_of_file = (read_arg->io_amount == 0);
+
+	done_cb(obj_hdl, fsalstat(0, 0), read_arg, caller_arg);
 }
 
 /**
@@ -1335,61 +1344,68 @@ fsal_status_t rgw_fsal_read2(struct fsal_obj_handle *obj_hdl,
  * @param[in]     obj_hdl        File on which to operate
  * @param[in]     bypass         If state doesn't indicate a share reservation,
  *                               bypass any non-mandatory deny write
- * @param[in]     state          state_t to use for this operation
- * @param[in]     offset         Position at which to write
- * @param[in]     buffer         Data to be written
- * @param[in,out] fsal_stable    In, if on, the fsal is requested to write data
- *                               to stable store. Out, the fsal reports what
- *                               it did.
- * @param[in,out] info           more information about the data
- *
- * @return FSAL status.
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] write_arg	Info about write, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
  */
 
-fsal_status_t rgw_fsal_write2(struct fsal_obj_handle *obj_hdl,
-			bool bypass,
-			struct state_t *state,
-			uint64_t offset,
-			size_t buffer_size,
-			void *buffer,
-			 size_t *wrote_amount,
-			bool *fsal_stable,
-			struct io_info *info)
+void rgw_fsal_write2(struct fsal_obj_handle *obj_hdl,
+		     bool bypass,
+		     fsal_async_cb done_cb,
+		     struct fsal_io_arg *write_arg,
+		     void *caller_arg)
 {
 	struct rgw_export *export =
 		container_of(op_ctx->fsal_export, struct rgw_export, export);
 
 	struct rgw_handle *handle = container_of(obj_hdl, struct rgw_handle,
 						handle);
-	LogFullDebug(COMPONENT_FSAL,
-		"%s enter obj_hdl %p state %p", __func__, obj_hdl, state);
+	int rc, i;
+	uint64_t offset = write_arg->offset;
 
-	if (info != NULL) {
+	LogFullDebug(COMPONENT_FSAL,
+		"%s enter obj_hdl %p state %p", __func__, obj_hdl,
+		write_arg->state);
+
+	if (write_arg->info != NULL) {
 		/* Currently we don't support WRITE_PLUS */
-		return fsalstat(ERR_FSAL_NOTSUPP, 0);
+		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), write_arg,
+			caller_arg);
+		return;
 	}
 
 	/* XXX note no call to fsal_find_fd (or wrapper) */
 
-	int rc = rgw_write(export->rgw_fs, handle->rgw_fh, offset,
-			buffer_size, wrote_amount, buffer,
-			(!state) ? RGW_OPEN_FLAG_V3 : RGW_OPEN_FLAG_NONE);
+	for (i = 0; i < write_arg->iov_count; i++) {
+		size_t nb_write;
 
-	LogFullDebug(COMPONENT_FSAL,
-		"%s post obj_hdl %p state %p returned %d", __func__, obj_hdl,
-		state, rc);
+		rc = rgw_write(export->rgw_fs, handle->rgw_fh, offset,
+			       write_arg->iov[i].iov_len, &nb_write,
+			       write_arg->iov[i].iov_base,
+			       (!write_arg->state) ? RGW_OPEN_FLAG_V3 :
+			       RGW_OPEN_FLAG_NONE);
 
-	if (rc < 0)
-		return rgw2fsal_error(rc);
+		if (rc < 0) {
+			done_cb(obj_hdl, rgw2fsal_error(rc), write_arg,
+				caller_arg);
+			return;
+		}
 
-	if (*fsal_stable) {
+		write_arg->io_amount += nb_write;
+		offset += nb_write;
+	}
+	if (write_arg->fsal_stable) {
 		rc = rgw_fsync(export->rgw_fs, handle->rgw_fh,
 			       RGW_WRITE_FLAG_NONE);
-		if (rc < 0)
-			return rgw2fsal_error(rc);
+		if (rc < 0) {
+			write_arg->fsal_stable = false;
+			done_cb(obj_hdl, rgw2fsal_error(rc), write_arg,
+				caller_arg);
+			return;
+		}
 	}
 
-	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+	done_cb(obj_hdl, fsalstat(ERR_FSAL_NO_ERROR, 0), write_arg, caller_arg);
 }
 
 /**
@@ -1607,6 +1623,8 @@ static void handle_to_key(struct fsal_obj_handle *obj_hdl,
 
 void handle_ops_init(struct fsal_obj_ops *ops)
 {
+	fsal_default_obj_ops_init(ops);
+
 	ops->release = release;
 	ops->merge = rgw_merge;
 	ops->lookup = lookup;

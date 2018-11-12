@@ -32,9 +32,7 @@
 #include "fsal_api.h"
 #include "../vfs_methods.h"
 #include "../subfsal.h"
-#ifdef ENABLE_VFS_DEBUG_ACL
 #include "attrs.h"
-#endif /* ENABLE_VFS_DEBUG_ACL */
 
 /* Export */
 
@@ -55,6 +53,8 @@ static struct config_item export_params[] = {
 	CONF_ITEM_TOKEN("fsid_type", FSID_NO_TYPE,
 			fsid_types,
 			vfs_fsal_export, fsid_type),
+	CONF_ITEM_BOOL("async_hsm_restore", true,
+		       vfs_fsal_export, async_hsm_restore),
 	CONFIG_EOL
 };
 
@@ -103,10 +103,8 @@ struct vfs_fsal_obj_handle *vfs_sub_alloc_handle(void)
 
 
 struct vfs_subfsal_obj_ops vfs_obj_subops = {
-#ifdef ENABLE_VFS_DEBUG_ACL
 	vfs_sub_getattrs,
 	vfs_sub_setattrs,
-#endif /* ENABLE_VFS_DEBUG_ACL */
 };
 
 int vfs_sub_init_handle(struct vfs_fsal_export *myself,

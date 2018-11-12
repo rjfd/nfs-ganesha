@@ -1,4 +1,6 @@
 /*
+ * vim:noexpandtab:shiftwidth=8:tabstop=8:
+ *
  *   Copyright (C) International Business Machines  Corp., 2010
  *   Author(s): Aneesh Kumar K.V <aneesh.kumar@linux.vnet.ibm.com>
  *
@@ -31,10 +33,20 @@
 #include "fsal_handle_syscalls.h"
 #include "fsal_api.h"
 #include "FSAL/fsal_commonlib.h"
+#include "FSAL/access_check.h"
 
 struct vfs_fsal_obj_handle;
 struct vfs_fsal_export;
 struct vfs_filesystem;
+
+/*
+ * VFS internal module
+ */
+struct vfs_fsal_module {
+	struct fsal_module module;
+	struct fsal_obj_ops handle_ops;
+	bool only_one_user;
+};
 
 /*
  * VFS internal export
@@ -44,6 +56,7 @@ struct vfs_fsal_export {
 	struct fsal_filesystem *root_fs;
 	struct glist_head filesystems;
 	int fsid_type;
+	bool async_hsm_restore;
 };
 
 #define EXPORT_VFS_FROM_FSAL(fsal) \
@@ -159,10 +172,6 @@ struct vfs_fsal_obj_handle {
 			struct fsal_share share;
 			struct vfs_fd fd;
 		} file;
-		struct {
-			char *path;
-			char *fs_location;
-		} directory;
 		struct {
 			unsigned char *link_content;
 			int link_size;
@@ -287,25 +296,17 @@ fsal_status_t vfs_reopen2(struct fsal_obj_handle *obj_hdl,
 			  struct state_t *state,
 			  fsal_openflags_t openflags);
 
-fsal_status_t vfs_read2(struct fsal_obj_handle *obj_hdl,
-			bool bypass,
-			struct state_t *state,
-			uint64_t offset,
-			size_t buffer_size,
-			void *buffer,
-			size_t *read_amount,
-			bool *end_of_file,
-			struct io_info *info);
+void vfs_read2(struct fsal_obj_handle *obj_hdl,
+	       bool bypass,
+	       fsal_async_cb done_cb,
+	       struct fsal_io_arg *read_arg,
+	       void *caller_arg);
 
-fsal_status_t vfs_write2(struct fsal_obj_handle *obj_hdl,
-			 bool bypass,
-			 struct state_t *state,
-			 uint64_t offset,
-			 size_t buffer_size,
-			 void *buffer,
-			 size_t *wrote_amount,
-			 bool *fsal_stable,
-			 struct io_info *info);
+void vfs_write2(struct fsal_obj_handle *obj_hdl,
+		bool bypass,
+		fsal_async_cb done_cb,
+		struct fsal_io_arg *write_arg,
+		void *caller_arg);
 
 fsal_status_t vfs_commit2(struct fsal_obj_handle *obj_hdl,
 			  off_t offset,
@@ -342,24 +343,55 @@ fsal_status_t vfs_getextattr_id_by_name(struct fsal_obj_handle *obj_hdl,
 					unsigned int *pxattr_id);
 fsal_status_t vfs_getextattr_value_by_name(struct fsal_obj_handle *obj_hdl,
 					   const char *xattr_name,
-					   caddr_t buffer_addr,
+					   void *buffer_addr,
 					   size_t buffer_size,
 					   size_t *p_output_size);
 fsal_status_t vfs_getextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					 unsigned int xattr_id,
-					 caddr_t buffer_addr,
+					 void *buffer_addr,
 					 size_t buffer_size,
 					 size_t *p_output_size);
 fsal_status_t vfs_setextattr_value(struct fsal_obj_handle *obj_hdl,
-				   const char *xattr_name, caddr_t buffer_addr,
-				   size_t buffer_size, int create);
+				   const char *xattr_name,
+				   void *buffer_addr,
+				   size_t buffer_size,
+				   int create);
 fsal_status_t vfs_setextattr_value_by_id(struct fsal_obj_handle *obj_hdl,
 					 unsigned int xattr_id,
-					 caddr_t buffer_addr,
+					 void *buffer_addr,
 					 size_t buffer_size);
 fsal_status_t vfs_remove_extattr_by_id(struct fsal_obj_handle *obj_hdl,
 				       unsigned int xattr_id);
 fsal_status_t vfs_remove_extattr_by_name(struct fsal_obj_handle *obj_hdl,
 					 const char *xattr_name);
+
+fsal_status_t check_hsm_by_fd(int fd);
+
+fsal_status_t vfs_get_fs_locations(struct vfs_fsal_obj_handle *hdl,
+				   struct attrlist *attrs_out);
+
+static inline bool vfs_set_credentials(const struct user_cred *creds,
+					  const struct fsal_module *fsal_module)
+{
+	bool only_one_user = container_of(fsal_module,
+				struct vfs_fsal_module, module)->only_one_user;
+
+	if (only_one_user)
+		return fsal_set_credentials_only_one_user(creds);
+	else {
+		fsal_set_credentials(creds);
+		return true;
+	}
+}
+
+static inline void vfs_restore_ganesha_credentials(const struct fsal_module
+							*fsal_module)
+{
+	bool only_one_user = container_of(fsal_module,
+				struct vfs_fsal_module, module)->only_one_user;
+
+	if (!only_one_user)
+		fsal_restore_ganesha_credentials();
+}
 
 #endif			/* VFS_METHODS_H */

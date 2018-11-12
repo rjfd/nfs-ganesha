@@ -508,12 +508,14 @@ mdcache_lru_clean(mdcache_entry_t *entry)
 		/* Find the first export id. */
 		export_id = atomic_fetch_int32_t(&entry->first_export_id);
 
-		if (export_id >= 0 && op_ctx != NULL &&
-		    op_ctx->ctx_export != NULL &&
-		    op_ctx->ctx_export->export_id != export_id) {
-			/* We can't be sure the op_ctx has a valid export_id for
-			 * this entry, so we'll use the first export_id and set
-			 * up a new op_ctx.
+		/* Check if we have a valid op_ctx */
+		if (export_id >= 0 && (op_ctx == NULL ||
+		    op_ctx->ctx_export == NULL ||
+		    op_ctx->ctx_export->export_id != export_id)) {
+			/* If the entry's first_export_id is valid and does not
+			 * match the current op_ctx, set up a new context
+			 * using first_export_id to ensure the op_ctx export is
+			 * valid for the entry.
 			 *
 			 * Get a reference to the first_export_id.
 			 */
@@ -569,7 +571,7 @@ mdcache_lru_clean(mdcache_entry_t *entry)
 		}
 
 		subcall(
-			entry->sub_handle->obj_ops.release(entry->sub_handle)
+			entry->sub_handle->obj_ops->release(entry->sub_handle)
 		       );
 		entry->sub_handle = NULL;
 
@@ -585,11 +587,11 @@ mdcache_lru_clean(mdcache_entry_t *entry)
 	/* Done with the attrs */
 	fsal_release_attrs(&entry->attrs);
 
-	/* Clean our handle */
-	fsal_obj_handle_fini(&entry->obj_handle);
-
 	/* Clean out the export mapping before deconstruction */
 	mdc_clean_entry(entry);
+
+	/* Clean our handle */
+	fsal_obj_handle_fini(&entry->obj_handle);
 
 	/* Finalize last bits of the cache entry, delete the key if any and
 	 * destroy the rw locks.
@@ -597,6 +599,11 @@ mdcache_lru_clean(mdcache_entry_t *entry)
 	mdcache_key_delete(&entry->fh_hk.key);
 	PTHREAD_RWLOCK_destroy(&entry->content_lock);
 	PTHREAD_RWLOCK_destroy(&entry->attr_lock);
+
+	state_hdl_cleanup(entry->obj_handle.state_hdl);
+
+	if (entry->obj_handle.type == DIRECTORY)
+		pthread_spin_destroy(&entry->fsobj.fsdir.spin);
 }
 
 /**
@@ -643,6 +650,11 @@ lru_reap_impl(enum lru_q_id qid)
 		}
 		refcnt = atomic_inc_int32_t(&lru->refcnt);
 		entry = container_of(lru, mdcache_entry_t, lru);
+#ifdef USE_LTTNG
+	tracepoint(mdcache, mdc_lru_ref,
+		   __func__, __LINE__, &entry->obj_handle, entry->sub_handle,
+		   refcnt);
+#endif
 		QUNLOCK(qlane);
 
 		if (unlikely(refcnt != (LRU_SENTINEL_REFCOUNT + 1))) {
@@ -668,7 +680,7 @@ lru_reap_impl(enum lru_q_id qid)
 
 #ifdef USE_LTTNG
 				tracepoint(mdcache, mdc_lru_reap, __func__,
-					   __LINE__, entry,
+					   __LINE__, &entry->obj_handle,
 					   entry->lru.refcnt);
 #endif
 				LRU_DQ_SAFE(lru, q);
@@ -735,8 +747,9 @@ lru_try_reap_entry(void)
  *
  * @note The caller @a MUST @a NOT hold the lane lock
  *
- * @param[in] qid     Queue to reap
- * @param[in] parent  The directory we desire a chunk for
+ * @param[in] qid        Queue to reap
+ * @param[in] parent     The directory we desire a chunk for
+ * @param[in] prev_chunk If non-NULL, the previous chunk in this directory
  *
  * @return Available chunk if found, NULL otherwise
  */
@@ -744,7 +757,8 @@ lru_try_reap_entry(void)
 static uint32_t chunk_reap_lane;
 
 static inline mdcache_lru_t *
-lru_reap_chunk_impl(enum lru_q_id qid, mdcache_entry_t *parent)
+lru_reap_chunk_impl(enum lru_q_id qid, mdcache_entry_t *parent,
+		    struct dir_chunk *prev_chunk)
 {
 	uint32_t lane;
 	struct lru_q_lane *qlane;
@@ -779,6 +793,12 @@ lru_reap_chunk_impl(enum lru_q_id qid, mdcache_entry_t *parent)
 		chunk = container_of(lru, struct dir_chunk, chunk_lru);
 		entry = chunk->parent;
 
+		if (chunk == prev_chunk) {
+			/* We can't reap prev_chunk. */
+			QUNLOCK(qlane);
+			continue;
+		}
+
 		/* If this chunk belongs to the parent seeking another chunk,
 		 * or if we can get the content_lock for the chunk's parent,
 		 * we can reap this chunk.
@@ -808,7 +828,7 @@ lru_reap_chunk_impl(enum lru_q_id qid, mdcache_entry_t *parent)
 #ifdef USE_LTTNG
 				tracepoint(mdcache, mdc_lru_reap_chunk,
 					   __func__, __LINE__,
-					   entry, chunk);
+					   &entry->obj_handle, chunk);
 #endif
 
 			/* Clean the chunk out and indicate the directory is no
@@ -820,7 +840,6 @@ lru_reap_chunk_impl(enum lru_q_id qid, mdcache_entry_t *parent)
 
 			/* Clean out the fields not touched by the cleanup. */
 			chunk->parent = NULL;
-			chunk->prev_chunk = NULL;
 			chunk->next_ck = 0;
 			chunk->num_entries = 0;
 
@@ -850,23 +869,29 @@ lru_reap_chunk_impl(enum lru_q_id qid, mdcache_entry_t *parent)
  * @brief Re-use or allocate a chunk
  *
  * This function repurposes a resident chunk in the LRU system if the system is
- * above the high-water mark, and allocates a new one otherwise.
+ * above the high-water mark, and allocates a new one otherwise.  The resulting
+ * chunk is inserted into the chunk list.
  *
  * @note The caller must hold the content_lock of the parent for write.
  *
- * @param[in] parent  The parent directory we desire a chunk for
+ * @param[in] parent     The parent directory we desire a chunk for
+ * @param[in] prev_chunk If non-NULL, the previous chunk in this directory
+ * @param[in] whence	 If @a prev_chunk is NULL, the starting whence of chunk
  *
  * @return reused or allocated chunk
  */
-struct dir_chunk *mdcache_get_chunk(mdcache_entry_t *parent)
+struct dir_chunk *mdcache_get_chunk(mdcache_entry_t *parent,
+				    struct dir_chunk *prev_chunk,
+				    fsal_cookie_t whence)
 {
 	mdcache_lru_t *lru = NULL;
 	struct dir_chunk *chunk = NULL;
 
 	if (lru_state.chunks_used >= lru_state.chunks_hiwat) {
-		lru = lru_reap_chunk_impl(LRU_ENTRY_L2, parent);
+		lru = lru_reap_chunk_impl(LRU_ENTRY_L2, parent, prev_chunk);
 		if (!lru)
-			lru = lru_reap_chunk_impl(LRU_ENTRY_L1, parent);
+			lru = lru_reap_chunk_impl(
+					LRU_ENTRY_L1, parent, prev_chunk);
 	}
 
 	if (lru) {
@@ -885,8 +910,17 @@ struct dir_chunk *mdcache_get_chunk(mdcache_entry_t *parent)
 		(void) atomic_inc_int64_t(&lru_state.chunks_used);
 	}
 
-	/* Set the chunk's parent. */
+	/* Set the chunk's parent and insert */
 	chunk->parent = parent;
+	if (prev_chunk) {
+		glist_add(&prev_chunk->chunks, &chunk->chunks);
+		chunk->reload_ck = glist_last_entry(&prev_chunk->dirents,
+						    mdcache_dir_entry_t,
+						    chunk_list)->ck;
+	} else {
+		glist_add(&chunk->parent->fsobj.fsdir.chunks, &chunk->chunks);
+		chunk->reload_ck = whence;
+	}
 
 	/* Chunk refcnt is not used (chunks are always protected by content_lock
 	 * and outside of LRU operations are not found other than while holding
@@ -1064,9 +1098,9 @@ static inline size_t lru_run_lane(size_t lane, uint64_t *const totalclosed)
 			goto next_lane;
 
 		lru = glist_entry(qlane->iter.glist, mdcache_lru_t, q);
-		refcnt = atomic_inc_int32_t(&lru->refcnt);
 
-		/* get entry early */
+		/* get entry early.  This is safe without a ref, because we have
+		 * the QLANE lock */
 		entry = container_of(lru, mdcache_entry_t, lru);
 
 		/* Get a reference to the first export and build an op context
@@ -1079,33 +1113,34 @@ static inline size_t lru_run_lane(size_t lane, uint64_t *const totalclosed)
 		export_id = atomic_fetch_int32_t(&entry->first_export_id);
 
 		if (export_id < 0) {
-			/* This should never happen, since any entry that only
-			 * had a sentinel reference must either have a mapped
-			 * export or be in the LRU_ENTRY_CLEANUP queue and thus
-			 * not eligible for lru_run_lane.
-			 */
-			LogFatal(COMPONENT_CACHE_INODE,
-				 "No first_export for entry %p is unexpected.",
-				 entry);
+			/* This entry is part of an export that's going away.
+			 * Just skip it. */
+			continue;
 		}
 
 		export = get_gsh_export(export_id);
 
 		if (export == NULL) {
-			/* This really should not happen, if an unexport is in
-			 * progress, the export_id is now not removed until
-			 * after mdcache has detached all entries from the
-			 * export. An entry that is actually in the process of
-			 * being detached has an LRU reference which prevents it
-			 * from being processed by lru_run_lane, so there is no
-			 * path to get here without the export still being
-			 * valid.
+			/* Creating the root object of an export and inserting
+			 * the export are not atomic.  That is, we create the
+			 * root object (and it's inserted in the LRU), and then
+			 * we insert the export, to make it reachable.  This
+			 * creates a tiny window the root object is in the LRU
+			 * (and therefore visible in this function) but the
+			 * export is not yet inserted, and so the above lookup
+			 * will fail.  Skip such entries, as this is a
+			 * self-correcting situation.
 			 */
-			LogFatal(COMPONENT_CACHE_INODE,
-				 "An entry (%p) having an unmappable export_id (%"
-				 PRIi32") is unexpected",
-				 entry, export_id);
+			continue;
 		}
+
+		/* Get a ref on the entry now */
+		refcnt = atomic_inc_int32_t(&entry->lru.refcnt);
+#ifdef USE_LTTNG
+	tracepoint(mdcache, mdc_lru_ref,
+		   __func__, __LINE__, &entry->obj_handle, entry->sub_handle,
+		   refcnt);
+#endif
 
 		init_root_op_context(&ctx, export, export->fsal_export, 0, 0,
 				     UNKNOWN_REQUEST);
@@ -1248,6 +1283,10 @@ lru_run(struct fridgethr_context *ctx)
 		/* If we make it all the way through a timed sleep
 		   without being woken, we assume we aren't racing
 		   against the impossible. */
+		if (lru_state.futility >= mdcache_param.futility_count)
+			LogInfo(COMPONENT_CACHE_INODE_LRU,
+				"Leaving FD futility mode.");
+
 		lru_state.futility = 0;
 	}
 
@@ -1334,10 +1373,10 @@ lru_run(struct fridgethr_context *ctx)
 			       lru_state.fds_hiwat) *
 			      mdcache_param.required_progress) /
 			     100)))) {
-			if (++lru_state.futility >
+			if (++lru_state.futility ==
 			    mdcache_param.futility_count) {
-				LogCrit(COMPONENT_CACHE_INODE_LRU,
-					"Futility count exceeded.  The LRU thread is unable to make progress in reclaiming FDs, will try harder.");
+				LogWarn(COMPONENT_CACHE_INODE_LRU,
+					"Futility count exceeded.  Client load is opening FDs faster than the LRU thread can close them.");
 			}
 		}
 	}
@@ -1429,7 +1468,7 @@ static inline size_t chunk_lru_run_lane(size_t lane)
 
 		/* Move lru object to MRU of L2 */
 		q = &qlane->L1;
-		LRU_DQ_SAFE(lru, q);
+		CHUNK_LRU_DQ_SAFE(lru, q);
 		lru->qid = LRU_ENTRY_L2;
 		q = &qlane->L2;
 		lru_insert(lru, q, LRU_MRU);
@@ -1500,6 +1539,32 @@ static void chunk_lru_run(struct fridgethr_context *ctx)
 	LogDebug(COMPONENT_CACHE_INODE_LRU,
 		 "After work, threadwait=%" PRIu64 " totalwork=%zd",
 		 ((uint64_t) new_thread_wait), totalwork);
+}
+
+/**
+ * @brief Remove reapable entries until we are below the high-water mark
+ *
+ * If something refs a lot of entries at the same time, this can put the number
+ * of entries above the high water mark.  They will slowly fall, as entries are
+ * actually freed, but this may take a very long time.
+ *
+ * This is a big hammer, that will clean up anything it can until either it
+ * can't anymore, or we're back below the high water mark.
+ *
+ * @param[in] parm     Parameter description
+ * @return Return description
+ */
+void lru_cleanup_entries(void)
+{
+	mdcache_lru_t *lru;
+	mdcache_entry_t *entry = NULL;
+
+	while ((lru = lru_try_reap_entry())) {
+		if (lru) {
+			entry = container_of(lru, mdcache_entry_t, lru);
+			mdcache_lru_unref(entry);
+		}
+	}
 }
 
 void init_fds_limit(void)
@@ -1726,7 +1791,7 @@ mdcache_entry_t *alloc_cache_entry(void)
  *
  * @return a usable entry or NULL if unexport is in progress.
  */
-mdcache_entry_t *mdcache_lru_get(void)
+mdcache_entry_t *mdcache_lru_get(struct fsal_obj_handle *sub_handle)
 {
 	mdcache_lru_t *lru;
 	mdcache_entry_t *nentry = NULL;
@@ -1735,8 +1800,6 @@ mdcache_entry_t *mdcache_lru_get(void)
 	if (lru) {
 		/* we uniquely hold entry */
 		nentry = container_of(lru, mdcache_entry_t, lru);
-		LogFullDebug(COMPONENT_CACHE_INODE_LRU,
-			     "Recycling entry at %p.", nentry);
 		mdcache_lru_clean(nentry);
 		memset(&nentry->attrs, 0, sizeof(nentry->attrs));
 		init_rw_locks(nentry);
@@ -1749,26 +1812,37 @@ mdcache_entry_t *mdcache_lru_get(void)
 	nentry->lru.refcnt = 2;
 	nentry->lru.cf = 0;
 	nentry->lru.lane = lru_lane_of(nentry);
+	nentry->sub_handle = sub_handle;
 
 #ifdef USE_LTTNG
 	tracepoint(mdcache, mdc_lru_get,
-		   __func__, __LINE__, nentry, nentry->lru.refcnt);
+		  __func__, __LINE__, &nentry->obj_handle, sub_handle,
+		  nentry->lru.refcnt);
 #endif
-
 	return nentry;
 }
 
 /**
  * @brief Insert a new entry into the LRU.
  *
- * Entry is inserted into LRU of L1 queue.
+ * Entry is inserted the LRU.  For scans, insert into the MRU of L2, to avoid
+ * having entries recycled before they're used during readdir.  For everything
+ * else, insert into LRU of L1, so that a single ref promotes to the MRU of L1.
  *
- * @param [in] ntry  Entry to insert.
+ * @param [in] entry  Entry to insert.
+ * @param [in] reason Reason we're inserting
  */
-void mdcache_lru_insert(mdcache_entry_t *entry)
+void mdcache_lru_insert(mdcache_entry_t *entry, mdc_reason_t reason)
 {
 	/* Enqueue. */
-	lru_insert_entry(entry, &LRU[entry->lru.lane].L1, LRU_LRU);
+	switch (reason) {
+	case MDC_REASON_DEFAULT:
+		lru_insert_entry(entry, &LRU[entry->lru.lane].L1, LRU_LRU);
+		break;
+	case MDC_REASON_SCAN:
+		lru_insert_entry(entry, &LRU[entry->lru.lane].L2, LRU_MRU);
+		break;
+	}
 }
 
 /**
@@ -1804,7 +1878,7 @@ _mdcache_lru_ref(mdcache_entry_t *entry, uint32_t flags, const char *func,
 
 #ifdef USE_LTTNG
 	tracepoint(mdcache, mdc_lru_ref,
-		   func, line, entry, refcnt);
+		   func, line, &entry->obj_handle, entry->sub_handle, refcnt);
 #endif
 
 	/* adjust LRU on initial refs */
@@ -1886,7 +1960,7 @@ _mdcache_lru_unref(mdcache_entry_t *entry, uint32_t flags, const char *func,
 
 #ifdef USE_LTTNG
 	tracepoint(mdcache, mdc_lru_unref,
-		   func, line, entry, refcnt);
+		   func, line, &entry->obj_handle, entry->sub_handle, refcnt);
 #endif
 
 	if (unlikely(refcnt == 0)) {
@@ -1923,11 +1997,11 @@ _mdcache_lru_unref(mdcache_entry_t *entry, uint32_t flags, const char *func,
 }
 
 /**
- * @brief Remove a chunk from LRU, clean it, and free it.
+ * @brief Remove a chunk from LRU, and clean it
  *
  * @param[in] chunk  The chunk to be removed from LRU
  */
-void lru_remove_chunk(struct dir_chunk *chunk)
+void lru_clean_chunk(struct dir_chunk *chunk)
 {
 	uint32_t lane = chunk->chunk_lru.lane;
 	struct lru_q_lane *qlane = &CHUNK_LRU[lane];
@@ -1951,10 +2025,35 @@ void lru_remove_chunk(struct dir_chunk *chunk)
 
 	/* Then do the actual cleaning work. */
 	mdcache_clean_dirent_chunk(chunk);
+}
+
+/**
+ * @brief Remove a chunk from LRU, clean it, and free it.
+ *
+ * @param[in] chunk  The chunk to be removed from LRU
+ */
+void lru_remove_chunk(struct dir_chunk *chunk)
+{
+	lru_clean_chunk(chunk);
 
 	/* And now we can free the chunk. */
 	LogFullDebug(COMPONENT_CACHE_INODE, "Freeing chunk %p", chunk);
 	gsh_free(chunk);
+}
+
+/**
+ * @brief Remove a chunk from LRU, and clean it
+ *
+ * @param[in] chunk  The chunk to be removed from LRU
+ */
+void lru_reuse_chunk(mdcache_entry_t *parent, struct dir_chunk *chunk)
+{
+	lru_clean_chunk(chunk);
+	chunk->parent = parent;
+	chunk->chunk_lru.refcnt = 0;
+	chunk->chunk_lru.cf = 0;
+	chunk->chunk_lru.lane = lru_lane_of(chunk);
+	lru_insert_chunk(chunk, &CHUNK_LRU[chunk->chunk_lru.lane].L2, LRU_MRU);
 }
 
 /**
@@ -1965,14 +2064,15 @@ void lru_bump_chunk(struct dir_chunk *chunk)
 {
 	mdcache_lru_t *lru = &chunk->chunk_lru;
 	struct lru_q_lane *qlane = &CHUNK_LRU[lru->lane];
-	struct lru_q *q = chunk_lru_queue_of(chunk);
+	struct lru_q *q;
 
 	QLOCK(qlane);
+	q = chunk_lru_queue_of(chunk);
 
 	switch (lru->qid) {
 	case LRU_ENTRY_L1:
 		/* advance chunk to MRU (of L1) */
-		LRU_DQ_SAFE(lru, q);
+		CHUNK_LRU_DQ_SAFE(lru, q);
 		lru_insert(lru, q, LRU_MRU);
 		break;
 	case LRU_ENTRY_L2:

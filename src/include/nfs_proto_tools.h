@@ -291,7 +291,8 @@ int nfs4_Fattr_To_FSAL_attr(struct attrlist *, fattr4 *, compound_data_t *);
 
 int nfs4_Fattr_To_fsinfo(fsal_dynamicfsinfo_t *, fattr4 *);
 
-int nfs4_Fattr_Fill_Error(fattr4 *, nfsstat4);
+int nfs4_Fattr_Fill_Error(compound_data_t *, fattr4 *, nfsstat4,
+			  struct bitmap4 *, struct xdr_attrs_args *args);
 
 int nfs4_FSALattr_To_Fattr(struct xdr_attrs_args *, struct bitmap4 *,
 			   fattr4 *);
@@ -307,5 +308,9 @@ enum nfs4_minor_vers {
 void nfs4_pathname4_alloc(pathname4 *, char *);
 
 void nfs4_pathname4_free(pathname4 *);
+
+uint32_t resp_room(compound_data_t *data);
+
+nfsstat4 check_resp_room(compound_data_t *data, uint32_t op_resp_size);
 
 #endif				/* _NFS_PROTO_TOOLS_H */

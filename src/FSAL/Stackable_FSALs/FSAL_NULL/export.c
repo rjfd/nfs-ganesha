@@ -52,8 +52,6 @@
 /* helpers to/from other NULL objects
  */
 
-struct fsal_staticfsinfo_t *nullfs_staticinfo(struct fsal_module *hdl);
-
 /* export object methods
  */
 
@@ -200,19 +198,6 @@ static uint32_t fs_maxpathlen(struct fsal_export *exp_hdl)
 	return result;
 }
 
-static struct timespec fs_lease_time(struct fsal_export *exp_hdl)
-{
-	struct nullfs_fsal_export *exp =
-		container_of(exp_hdl, struct nullfs_fsal_export, export);
-
-	op_ctx->fsal_export = exp->export.sub_export;
-	struct timespec result = exp->export.sub_export->exp_ops.fs_lease_time(
-		exp->export.sub_export);
-	op_ctx->fsal_export = &exp->export;
-
-	return result;
-}
-
 static fsal_aclsupp_t fs_acl_support(struct fsal_export *exp_hdl)
 {
 	struct nullfs_fsal_export *exp =
@@ -249,20 +234,6 @@ static uint32_t fs_umask(struct fsal_export *exp_hdl)
 	uint32_t result = exp->export.sub_export->exp_ops.fs_umask(
 				exp->export.sub_export);
 
-	op_ctx->fsal_export = &exp->export;
-
-	return result;
-}
-
-static uint32_t fs_xattr_access_rights(struct fsal_export *exp_hdl)
-{
-	struct nullfs_fsal_export *exp =
-		container_of(exp_hdl, struct nullfs_fsal_export, export);
-
-	op_ctx->fsal_export = exp->export.sub_export;
-	uint32_t result =
-		exp->export.sub_export->exp_ops.fs_xattr_access_rights(
-				exp->export.sub_export);
 	op_ctx->fsal_export = &exp->export;
 
 	return result;
@@ -402,6 +373,17 @@ static fsal_status_t nullfs_host_to_key(struct fsal_export *exp_hdl,
 	return result;
 }
 
+static void nullfs_prepare_unexport(struct fsal_export *exp_hdl)
+{
+	struct nullfs_fsal_export *exp =
+		container_of(exp_hdl, struct nullfs_fsal_export, export);
+
+	op_ctx->fsal_export = exp->export.sub_export;
+	exp->export.sub_export->exp_ops.prepare_unexport(
+						exp->export.sub_export);
+	op_ctx->fsal_export = &exp->export;
+}
+
 /* nullfs_export_ops_init
  * overwrite vector entries with the methods that we support
  */
@@ -409,6 +391,7 @@ static fsal_status_t nullfs_host_to_key(struct fsal_export *exp_hdl,
 void nullfs_export_ops_init(struct export_ops *ops)
 {
 	ops->release = release;
+	ops->prepare_unexport = nullfs_prepare_unexport;
 	ops->lookup_path = nullfs_lookup_path;
 	ops->wire_to_host = wire_to_host;
 	ops->host_to_key = nullfs_host_to_key;
@@ -421,11 +404,9 @@ void nullfs_export_ops_init(struct export_ops *ops)
 	ops->fs_maxlink = fs_maxlink;
 	ops->fs_maxnamelen = fs_maxnamelen;
 	ops->fs_maxpathlen = fs_maxpathlen;
-	ops->fs_lease_time = fs_lease_time;
 	ops->fs_acl_support = fs_acl_support;
 	ops->fs_supported_attrs = fs_supported_attrs;
 	ops->fs_umask = fs_umask;
-	ops->fs_xattr_access_rights = fs_xattr_access_rights;
 	ops->get_quota = get_quota;
 	ops->set_quota = set_quota;
 	ops->alloc_state = nullfs_alloc_state;
@@ -517,30 +498,6 @@ fsal_status_t nullfs_create_export(struct fsal_module *fsal_hdl,
 	}
 
 	fsal_export_stack(op_ctx->fsal_export, &myself->export);
-
-	/* Init next_ops structure */
-	/*** FIX ME!!!
-	 * This structure had 3 mallocs that were never freed,
-	 * and would leak for every export created.
-	 * Now static to avoid the leak, the saved contents were
-	 * never restored back to the original.
-	 */
-
-	memcpy(&next_ops.exp_ops,
-	       &myself->export.sub_export->exp_ops,
-	       sizeof(struct export_ops));
-#ifdef EXPORT_OPS_INIT
-	/*** FIX ME!!!
-	 * Need to iterate through the lists to save and restore.
-	 */
-	memcpy(&next_ops.obj_ops,
-	       myself->export.sub_export->obj_ops,
-	       sizeof(struct fsal_obj_ops));
-	memcpy(&next_ops.dsh_ops,
-	       myself->export.sub_export->dsh_ops,
-	       sizeof(struct fsal_dsh_ops));
-#endif				/* EXPORT_OPS_INIT */
-	next_ops.up_ops = up_ops;
 
 	fsal_export_init(&myself->export);
 	nullfs_export_ops_init(&myself->export.exp_ops);
