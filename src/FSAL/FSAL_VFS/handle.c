@@ -160,6 +160,52 @@ struct vfs_fsal_obj_handle *alloc_handle(int dirfd,
 	return NULL;
 }
 
+static fsal_status_t populate_fs_locations(struct vfs_fsal_obj_handle *hdl,
+					   struct attrlist *attrs_out)
+{
+	fsal_status_t status;
+	uint64 hash;
+	attrmask_t old_request_mask = attrs_out->request_mask;
+
+	attrs_out->request_mask = ATTR4_FS_LOCATIONS;
+	status = hdl->sub_ops->getattrs(hdl, -1 /* no fd here */,
+			attrs_out->request_mask,
+			attrs_out);
+	if (FSAL_IS_ERROR(status)) {
+		goto out;
+	}
+
+	if (FSAL_TEST_MASK(attrs_out->valid_mask, ATTR4_FS_LOCATIONS)) {
+		/* on a referral the filesystem id has to change
+		 * it get's calculated via a hash from the referral
+		 * and stored in the fsid object of the fsal_obj_handle
+		 */
+
+		fsal_fs_locations_t *fsloc = attrs_out->fs_locations;
+		int loclen = fsloc->server[0].utf8string_len +
+			strlen(fsloc->rootpath) + 2;
+
+		char *location = gsh_calloc(1, loclen);
+
+		snprintf(location, loclen, "%.*s:%s",
+				fsloc->server[0].utf8string_len,
+				fsloc->server[0].utf8string_val,
+				fsloc->rootpath);
+		hash = CityHash64(location, loclen);
+		hdl->obj_handle.fsid.major = hash;
+		hdl->obj_handle.fsid.minor = hash;
+		LogDebug(COMPONENT_NFS_V4,
+				"fsid.major = %"PRIu64", fsid.minor = %"PRIu64,
+				hdl->obj_handle.fsid.major,
+				hdl->obj_handle.fsid.minor);
+		gsh_free(location);
+	}
+
+out:
+	attrs_out->request_mask |= old_request_mask;
+	return status;
+}
+
 static fsal_status_t lookup_with_fd(struct vfs_fsal_obj_handle *parent_hdl,
 				    int dirfd, const char *path,
 				    struct fsal_obj_handle **handle,
@@ -281,44 +327,13 @@ static fsal_status_t lookup_with_fd(struct vfs_fsal_obj_handle *parent_hdl,
 	    hdl->obj_handle.fs->private_data != NULL &&
 	    hdl->sub_ops->getattrs) {
 
-		uint64 hash;
-		attrmask_t old_request_mask = attrs_out->request_mask;
-
-		attrs_out->request_mask = ATTR4_FS_LOCATIONS;
-		status = hdl->sub_ops->getattrs(hdl, -1 /* no fd here */,
-						attrs_out->request_mask,
-						attrs_out);
+		status = populate_fs_locations(hdl, attrs_out);
 		if (FSAL_IS_ERROR(status)) {
+			LogEvent(COMPONENT_FSAL, "Could not get the referral "
+				 "locations the path: %d, %s", dirfd, path);
+			gsh_free(hdl);
 			return status;
 		}
-
-		if (FSAL_TEST_MASK(attrs_out->valid_mask, ATTR4_FS_LOCATIONS)) {
-			/* on a referral the filesystem id has to change
-			 * it get's calculated via a hash from the referral
-			 * and stored in the fsid object of the fsal_obj_handle
-			 */
-
-			fsal_fs_locations_t *fsloc = attrs_out->fs_locations;
-			int loclen = fsloc->server[0].utf8string_len +
-				     strlen(fsloc->rootpath) + 2;
-
-			char *location = gsh_calloc(1, loclen);
-
-			snprintf(location, loclen, "%.*s:%s",
-				 fsloc->server[0].utf8string_len,
-				 fsloc->server[0].utf8string_val,
-				 fsloc->rootpath);
-			hash = CityHash64(location, loclen);
-			hdl->obj_handle.fsid.major = hash;
-			hdl->obj_handle.fsid.minor = hash;
-			LogDebug(COMPONENT_NFS_V4,
-				 "fsid.major = %"PRIu64", fsid.minor = %"PRIu64,
-				 hdl->obj_handle.fsid.major,
-				 hdl->obj_handle.fsid.minor);
-			gsh_free(location);
-		}
-
-		attrs_out->request_mask |= old_request_mask;
 	}
 
 	*handle = &hdl->obj_handle;
@@ -1117,7 +1132,7 @@ static fsal_status_t linkfile(struct fsal_obj_handle *obj_hdl,
  * Use the smallest buffer possible on FreeBSD
  * to narrow the race due to the d_off workaround.
  */
-#ifdef __FreeBSD__
+#ifndef HAS_DOFF
 #define BUF_SIZE sizeof(struct dirent)
 #else
 #define BUF_SIZE 1024
@@ -1148,7 +1163,7 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 	int nread;
 	struct vfs_dirent dentry, *dentryp = &dentry;
 	char buf[BUF_SIZE];
-#ifdef __FreeBSD__
+#ifndef HAS_DOFF
 	int nreadent;
 	char entbuf[sizeof(struct dirent)];
 	off_t rewindloc = 0;
@@ -1192,7 +1207,7 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 		}
 		if (nread == 0)
 			break;
-#ifdef __FreeBSD__
+#ifndef HAS_DOFF
 		/*
 		 * Very inefficient workaround to retrieve directory offsets.
 		 * We rewind dirfd's to its previous offset in order read the
@@ -1213,7 +1228,7 @@ static fsal_status_t read_dirents(struct fsal_obj_handle *dir_hdl,
 			if (!to_vfs_dirent(buf, bpos, dentryp, baseloc))
 				goto skip;
 
-#ifdef __FreeBSD__
+#ifndef HAS_DOFF
 			/* Re-read the entry and fetch its offset. */
 			nreadent = vfs_readents(dirfd, entbuf,
 						dentryp->vd_reclen, &entloc);
@@ -1677,12 +1692,18 @@ void vfs_handle_ops_init(struct fsal_obj_ops *ops)
 	ops->rename = renamefile;
 	ops->unlink = file_unlink;
 	ops->close = vfs_close;
+#ifdef FALLOC_FL_PUNCH_HOLE
+	ops->fallocate = vfs_fallocate;
+#endif
 	ops->handle_to_wire = handle_to_wire;
 	ops->handle_to_key = handle_to_key;
 	ops->open2 = vfs_open2;
 	ops->reopen2 = vfs_reopen2;
 	ops->read2 = vfs_read2;
 	ops->write2 = vfs_write2;
+#ifdef __USE_GNU
+	ops->seek2 = vfs_seek2;
+#endif
 	ops->commit2 = vfs_commit2;
 #ifdef F_OFD_GETLK
 	ops->lock_op2 = vfs_lock_op2;
@@ -1786,6 +1807,26 @@ fsal_status_t vfs_lookup_path(struct fsal_export *exp_hdl,
 
 	if (attrs_out != NULL) {
 		posix2fsal_attributes_all(&stat, attrs_out);
+	}
+
+	/* if it is a directory and the sticky bit is set
+	 * let's look for referral information
+	 */
+
+	if (attrs_out != NULL &&
+	    hdl->obj_handle.obj_ops->is_referral(&hdl->obj_handle, attrs_out,
+		false) &&
+	    hdl->obj_handle.fs->private_data != NULL &&
+	    hdl->sub_ops->getattrs) {
+
+		fsal_status_t status;
+
+		status = populate_fs_locations(hdl, attrs_out);
+		if (FSAL_IS_ERROR(status)) {
+			LogEvent(COMPONENT_FSAL, "Could not get the referral "
+				 "locations for the exported path: %s", path);
+			return status;
+		}
 	}
 
 	*handle = &hdl->obj_handle;

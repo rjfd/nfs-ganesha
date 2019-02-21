@@ -49,8 +49,9 @@
  * @see nfs4_Compound
  *
  */
-int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
-		     struct nfs_resop4 *resp)
+enum nfs_req_result nfs4_op_sequence(struct nfs_argop4 *op,
+				     compound_data_t *data,
+				     struct nfs_resop4 *resp)
 {
 	SEQUENCE4args * const arg_SEQUENCE4 = &op->nfs_argop4_u.opsequence;
 	SEQUENCE4res * const res_SEQUENCE4 = &resp->nfs_resop4_u.opsequence;
@@ -64,7 +65,7 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 
 	if (data->minorversion == 0) {
 		res_SEQUENCE4->sr_status = NFS4ERR_INVAL;
-		return res_SEQUENCE4->sr_status;
+		return NFS_REQ_ERROR;
 	}
 
 	if (!nfs41_Session_Get_Pointer(arg_SEQUENCE4->sa_sessionid, &session)) {
@@ -73,7 +74,7 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 			    "SEQUENCE returning status %s",
 			    nfsstat4_to_str(res_SEQUENCE4->sr_status));
 
-		return res_SEQUENCE4->sr_status;
+		return NFS_REQ_ERROR;
 	}
 
 	/* session->refcount +1 */
@@ -91,7 +92,7 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 		LogDebugAlt(COMPONENT_SESSIONS, COMPONENT_CLIENTID,
 			    "SEQUENCE returning status %s",
 			    nfsstat4_to_str(res_SEQUENCE4->sr_status));
-		return res_SEQUENCE4->sr_status;
+		return NFS_REQ_ERROR;
 	}
 
 	data->preserved_clientid = session->clientid_record;
@@ -107,11 +108,9 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 		LogDebugAlt(COMPONENT_SESSIONS, COMPONENT_CLIENTID,
 			    "SEQUENCE returning status %s",
 			    nfsstat4_to_str(res_SEQUENCE4->sr_status));
-		return res_SEQUENCE4->sr_status;
+		return NFS_REQ_ERROR;
 	}
 
-	/* By default, no DRC replay */
-	data->use_slot_cached_result = false;
 	slot = &session->fc_slots[slotid];
 
 	/* Serialize use of this slot. */
@@ -121,25 +120,30 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 		/* This sequence is NOT the next sequence */
 		if (slot->sequence == arg_SEQUENCE4->sa_sequenceid) {
 			/* But it is the previous sequence */
-			if (slot->cached_result.res_cached) {
+			if (slot->cached_result != NULL) {
+				int32_t refcnt;
+
 				/* And has a cached response.
 				 * Replay operation through the DRC
+				 * Take a reference to the slot cached response.
 				 */
-				data->use_slot_cached_result = true;
-				data->cached_result = &slot->cached_result;
+				data->slot = slot;
+				refcnt = atomic_inc_int32_t(
+					&slot->cached_result->res_refcnt);
 
 				LogFullDebugAlt(COMPONENT_SESSIONS,
 						COMPONENT_CLIENTID,
 						"Use sesson slot %" PRIu32
-						"=%p for DRC",
+						"=%p for replay refcnt=%"PRIi32,
 						slotid,
-						data->cached_result);
+						slot->cached_result,
+						refcnt);
 
 				PTHREAD_MUTEX_unlock(&slot->lock);
 
 				dec_session_ref(session);
 				res_SEQUENCE4->sr_status = NFS4_OK;
-				return res_SEQUENCE4->sr_status;
+				return NFS_REQ_REPLAY;
 			} else {
 				/* Illegal replay */
 				PTHREAD_MUTEX_unlock(&slot->lock);
@@ -155,7 +159,7 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 						res_SEQUENCE4->sr_status),
 					    slot->sequence,
 					    arg_SEQUENCE4->sa_sequenceid);
-				return res_SEQUENCE4->sr_status;
+				return NFS_REQ_ERROR;
 			}
 		}
 
@@ -166,7 +170,7 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 		LogDebugAlt(COMPONENT_SESSIONS, COMPONENT_CLIENTID,
 			    "SEQUENCE returning status %s",
 			    nfsstat4_to_str(res_SEQUENCE4->sr_status));
-		return res_SEQUENCE4->sr_status;
+		return NFS_REQ_ERROR;
 	}
 
 	/* Keep memory of the session in the COMPOUND's data */
@@ -174,16 +178,13 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 
 	/* Record the sequenceid and slotid in the COMPOUND's data */
 	data->sequence = arg_SEQUENCE4->sa_sequenceid;
-	data->slot = slotid;
+	data->slotid = slotid;
 
 	/* Update the sequence id within the slot */
 	slot->sequence += 1;
 
 	/* If the slot cache was in use, free it. */
-	if (slot->cached_result.res_cached) {
-		slot->cached_result.res_cached = false;
-		nfs4_Compound_Free((nfs_res_t *) &slot->cached_result);
-	}
+	release_slot(slot);
 
 	/* Set up the response */
 	memcpy(res_SEQUENCE4->SEQUENCE4res_u.sr_resok4.sr_sessionid,
@@ -204,14 +205,14 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 
 	/* Remember if we are caching result and set position to cache. */
 	data->sa_cachethis = arg_SEQUENCE4->sa_cachethis;
-	data->cached_result = &slot->cached_result;
+	data->slot = slot;
 
 	LogFullDebugAlt(COMPONENT_SESSIONS, COMPONENT_CLIENTID,
 			"%s sesson slot %" PRIu32 "=%p for DRC",
 			arg_SEQUENCE4->sa_cachethis
 				? "Use"
 				: "Don't use",
-			slotid, data->cached_result);
+			slotid, data->slot);
 
 	/* If we were successful, stash the clientid in the request
 	 * context.
@@ -231,14 +232,14 @@ int nfs4_op_sequence(struct nfs_argop4 *op, compound_data_t *data,
 
 		dec_session_ref(session);
 		data->session = NULL;
-		return res_SEQUENCE4->sr_status;
+		return NFS_REQ_ERROR;
 	}
 
 	/* We keep the slot lock to serialize use of the slot. */
 
 	(void) check_session_conn(session, data, true);
 
-	return res_SEQUENCE4->sr_status;
+	return NFS_REQ_OK;
 }				/* nfs41_op_sequence */
 
 /**

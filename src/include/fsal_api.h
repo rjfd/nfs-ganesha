@@ -411,7 +411,6 @@ struct req_op_context {
 	struct fsal_export *fsal_export;	/*< current fsal export */
 	struct export_perms *export_perms;	/*< Effective export perms */
 	nsecs_elapsed_t start_time;	/*< start time of this op/request */
-	nsecs_elapsed_t queue_wait;	/*< time in wait queue */
 	void *fsal_private;		/*< private for FSAL use */
 	struct fsal_module *fsal_module;	/*< current fsal module */
 	struct fsal_pnfs_ds *fsal_pnfs_ds;	/*< current pNFS DS */
@@ -517,6 +516,37 @@ struct fsal_ops {
 					void *parse_node,
 					struct config_error_type *err_type,
 					const struct fsal_up_vector *up_ops);
+
+/**
+ * @brief Update an existing export
+ *
+ * This will result in a temporary fsal_export being created, and built into
+ * a stacked export.
+ *
+ * On entry, op_ctx has the original gsh_export and no fsal_export.
+ *
+ * The caller passes the original fsal_export, as well as the new super_export's
+ * FSAL when there is a stacked export. This will allow the underlying export to
+ * validate that the stacking has not changed.
+ *
+ * This function does not actually create a new fsal_export, the only purpose is
+ * to validate and update the config.
+ *
+ * @param[in]     fsal_hdl         FSAL module
+ * @param[in]     parse_node       opaque pointer to parse tree node for
+ *                                 export options to be passed to
+ *                                 load_config_from_node
+ * @param[out]    err_type         config proocessing error reporting
+ * @param[in]     original         The original export that is being updated
+ * @param[in]     updated_super    The updated super_export's FSAL
+ *
+ * @return FSAL status.
+ */
+	 fsal_status_t (*update_export)(struct fsal_module *fsal_hdl,
+					void *parse_node,
+					struct config_error_type *err_type,
+					struct fsal_export *original,
+					struct fsal_module *updated_super);
 
 /**
  * @brief Minimal emergency cleanup on error
@@ -1281,7 +1311,7 @@ typedef enum fsal_dir_result (*fsal_readdir_cb)(
  */
 struct fsal_io_arg {
 	size_t io_amount;	/**< Total amount of I/O actually done */
-	struct io_info *info;	/**< More information about data */
+	struct io_info *info;	/**< More info about data for read_plus */
 	union {
 		bool end_of_file;	/**< True if end-of-file reached */
 		bool fsal_stable;	/**< requested/achieved stability */
@@ -2694,43 +2724,6 @@ struct fsal_dsh_ops {
 			  count4 * const written_length,
 			  verifier4 * const writeverf,
 			  stable_how4 * const stability_got);
-
-/**
- *
- * @brief Write plus to a data-server handle.
- *
- * NFSv4.2 data server filehandles are disjount from normal
- * filehandles (in Ganesha, there is a ds_flag in the filehandle_v4_t
- * structure) and do not get loaded into cache_inode or processed the
- * normal way.
- *
- * @param[in]  ds_hdl           FSAL DS handle
- * @param[in]  req_ctx          Credentials
- * @param[in]  stateid          The stateid supplied with the READ operation,
- *                              for validation
- * @param[in]  offset           The offset at which to read
- * @param[in]  write_length     Length of write requested (and size of buffer)
- * @param[out] buffer           The buffer to which to store read data
- * @param[in]  stability wanted Stability of write
- * @param[out] written_length   Length of data written
- * @param[out] writeverf        Write verifier
- * @param[out] stability_got    Stability used for write (must be as
- *                              or more stable than request)
- * @param[in/out] info          IO info
- *
- * @return An NFSv4.2 status code.
- */
-	 nfsstat4(*write_plus)(struct fsal_ds_handle *const ds_hdl,
-			       struct req_op_context *const req_ctx,
-			       const stateid4 * stateid,
-			       const offset4 offset,
-			       const count4 write_length,
-			       const void *buffer,
-			       const stable_how4 stability_wanted,
-			       count4 * const written_length,
-			       verifier4 * const writeverf,
-			       stable_how4 * const stability_got,
-			       struct io_info *info);
 
 /**
  * @brief Commit a byte range to a DS handle.

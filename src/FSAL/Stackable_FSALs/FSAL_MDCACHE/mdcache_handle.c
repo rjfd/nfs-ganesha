@@ -645,8 +645,14 @@ static fsal_status_t mdcache_rename(struct fsal_obj_handle *obj_hdl,
 			status = fsalstat(ERR_FSAL_XDEV, 0);
 			goto out;
 		}
-	}
 
+		if (state_deleg_conflict(&mdc_lookup_dst->obj_handle, true)) {
+			LogDebug(COMPONENT_CACHE_INODE, "Found an existing delegation for %s",
+				  new_name);
+			status = fsalstat(ERR_FSAL_DELAY, 0);
+			goto out;
+		}
+	}
 	/* Now update cached dirents.  Must take locks in the correct order */
 	mdcache_src_dest_lock(mdc_olddir, mdc_newdir);
 
@@ -763,13 +769,13 @@ unlock:
 out:
 	/* Refresh, if necessary.  Must be done without lock held */
 	if (FSAL_IS_SUCCESS(status)) {
-		/* If we're moving a directory out, update parent hash */
+		/* If we're moving a directory out, update parent hash.
+		 * Since we already dropped the src_desk lock, things
+		 * may have changed, so just free the parent fh.
+		 */
 		if (mdc_olddir != mdc_newdir && obj_hdl->type == DIRECTORY) {
 			PTHREAD_RWLOCK_wrlock(&mdc_obj->content_lock);
-
 			mdcache_free_fh(&mdc_obj->fsobj.fsdir.parent);
-			mdc_dir_add_parent(mdc_obj, mdc_newdir);
-
 			PTHREAD_RWLOCK_unlock(&mdc_obj->content_lock);
 		}
 
@@ -805,12 +811,17 @@ fsal_status_t mdcache_refresh_attrs(mdcache_entry_t *entry, bool need_acl,
 	struct attrlist attrs;
 	fsal_status_t status = {0, 0};
 	struct timespec oldmtime;
+	bool file_deleg = false;
+	cbgetattr_t *cbgetattr;
 
 	/* Use this to detect if we should invalidate a directory. */
 	oldmtime = entry->attrs.mtime;
 
+	file_deleg = (entry->obj_handle.state_hdl &&
+	  entry->obj_handle.state_hdl->file.fdeleg_stats.fds_curr_delegations);
+
 	/* We always ask for all regular attributes, even if the caller was
-	 * only interested in the ACL.
+	 * only interested in the ACL unless the file is delegated.
 	 */
 	fsal_prepare_attrs(&attrs,
 			   op_ctx->fsal_export->exp_ops.fs_supported_attrs(
@@ -824,6 +835,22 @@ fsal_status_t mdcache_refresh_attrs(mdcache_entry_t *entry, bool need_acl,
 	if (!need_fslocations) {
 		/* Don't request FS LOCATIONS if not required */
 		attrs.request_mask &= ~ATTR4_FS_LOCATIONS;
+	}
+
+	if (file_deleg && entry->attrs.expire_time_attr) {
+		/* If the file is delegated, then we can trust
+		 * the attributes already fetched (i.e, which
+		 * are in entry->attrs.valid_mask). Hence mask
+		 * them out.
+		 */
+		attrs.request_mask = (attrs.request_mask &
+				      ~entry->attrs.valid_mask);
+
+		/* Bail out if ATTR_RDATTR_ERR is the only remaining
+		 * attr set
+		 */
+		if ((attrs.request_mask & ~ATTR_RDATTR_ERR) == 0)
+			goto out;
 	}
 
 	/* We will want all the requested attributes in the entry */
@@ -843,11 +870,21 @@ fsal_status_t mdcache_refresh_attrs(mdcache_entry_t *entry, bool need_acl,
 
 	mdc_update_attr_cache(entry, &attrs);
 
+out:
 	/* Done with the attrs (we didn't need to call this since the
 	 * fsal_copy_attrs preceding consumed all the references, but we
 	 * release them anyway to make it easy to scan the code for correctness.
 	 */
 	fsal_release_attrs(&attrs);
+
+	/* Always save copy of latest change and filesize
+	 * to compare with values returned in cbgetattr response
+	 */
+	if (file_deleg) {
+		cbgetattr = &entry->obj_handle.state_hdl->file.cbgetattr;
+		cbgetattr->change = entry->attrs.change;
+		cbgetattr->filesize = entry->attrs.filesize;
+	}
 
 	LogAttrlist(COMPONENT_CACHE_INODE, NIV_FULL_DEBUG,
 		    "attrs ", &entry->attrs, true);
@@ -978,7 +1015,8 @@ static fsal_status_t mdcache_setattr2(struct fsal_obj_handle *obj_hdl,
 		/* Assume that the cache is bogus now */
 		atomic_clear_uint32_t_bits(&entry->mde_flags,
 				MDCACHE_TRUST_ATTRS | MDCACHE_TRUST_ACL |
-				MDCACHE_TRUST_FS_LOCATIONS);
+				MDCACHE_TRUST_FS_LOCATIONS |
+				MDCACHE_TRUST_SEC_LABEL);
 		if (status2.major == ERR_FSAL_STALE)
 			kill_entry = true;
 	} else if (change == entry->attrs.change) {

@@ -73,6 +73,8 @@
 #include "mdcache.h"
 #include "common_utils.h"
 #include "nfs_init.h"
+#include "conf_url_rados.h"
+#include <urcu-bp.h>
 
 /**
  * @brief init_complete used to indicate if ganesha is during
@@ -81,7 +83,6 @@
 struct nfs_init nfs_init;
 
 /* global information exported to all layers (as extern vars) */
-pool_t *nfs_request_pool;
 nfs_parameter_t nfs_param;
 struct _nfs_health nfs_health_;
 
@@ -202,8 +203,10 @@ void reread_config(void)
  */
 static void *sigmgr_thread(void *UnusedArg)
 {
-	SetNameFunction("sigmgr");
 	int signal_caught = 0;
+
+	SetNameFunction("sigmgr");
+	rcu_register_thread();
 
 	/* Loop until we catch SIGTERM */
 	while (signal_caught != SIGTERM) {
@@ -231,6 +234,7 @@ static void *sigmgr_thread(void *UnusedArg)
 	admin_halt();
 
 	/* Might as well exit - no need for this thread any more */
+	rcu_unregister_thread();
 	return NULL;
 }
 
@@ -314,7 +318,6 @@ void nfs_print_param_config(void)
 	printf("\tMNT_Port = %u ;\n", nfs_param.core_param.port[P_MNT]);
 	printf("\tNFS_Program = %u ;\n", nfs_param.core_param.program[P_NFS]);
 	printf("\tMNT_Program = %u ;\n", nfs_param.core_param.program[P_NFS]);
-	printf("\tNb_Worker = %u ;\n", nfs_param.core_param.nb_worker);
 	printf("\tDRC_TCP_Npart = %u ;\n", nfs_param.core_param.drc.tcp.npart);
 	printf("\tDRC_TCP_Size = %u ;\n", nfs_param.core_param.drc.tcp.size);
 	printf("\tDRC_TCP_Cachesz = %u ;\n",
@@ -339,20 +342,17 @@ void nfs_print_param_config(void)
 	printf("\tManage_Gids_Expiration = %" PRIu64 " ;\n",
 	       (uint64_t) nfs_param.core_param.manage_gids_expiration);
 
-	if (nfs_param.core_param.drop_io_errors)
-		printf("\tDrop_IO_Errors = true ;\n");
-	else
-		printf("\tDrop_IO_Errors = false ;\n");
+	printf("\tDrop_IO_Errors = %s ;\n",
+	       nfs_param.core_param.drop_io_errors ?  "true" : "false");
 
-	if (nfs_param.core_param.drop_inval_errors)
-		printf("\tDrop_Inval_Errors = true ;\n");
-	else
-		printf("\tDrop_Inval_Errors = false ;\n");
+	printf("\tDrop_Inval_Errors = %s ;\n",
+	       nfs_param.core_param.drop_inval_errors ?  "true" : "false");
 
-	if (nfs_param.core_param.drop_delay_errors)
-		printf("\tDrop_Delay_Errors = true ;\n");
-	else
-		printf("\tDrop_Delay_Errors = false ;\n");
+	printf("\tDrop_Delay_Errors = %s ;\n",
+	       nfs_param.core_param.drop_delay_errors ? "true" : "false");
+
+	printf("\tEnable UDP = %s ;\n", nfs_param.core_param.enable_UDP ?
+	       "true" : "false");
 
 	printf("}\n\n");
 }
@@ -448,6 +448,9 @@ int nfs_set_param_from_conf(config_file_t parse_tree,
 	if (rados_kv_set_param_from_conf(parse_tree, err_type) < 0)
 		return -1;
 #endif
+
+	if (rados_url_setup_watch() != 0)
+		return -1;
 
 	LogEvent(COMPONENT_INIT, "Configuration file successfully parsed");
 
@@ -641,9 +644,6 @@ static void nfs_Init(const nfs_start_info_t *p_start_info)
 
 	nfs41_session_pool =
 	    pool_basic_init("NFSv4.1 session pool", sizeof(nfs41_session_t));
-
-	nfs_request_pool =
-	    pool_basic_init("Request pool", sizeof(request_data_t));
 
 	/* If rpcsec_gss is used, set the path to the keytab */
 #ifdef _HAVE_GSSAPI

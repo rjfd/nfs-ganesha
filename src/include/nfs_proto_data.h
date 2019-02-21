@@ -102,7 +102,7 @@ typedef union nfs_arg__ {
 
 struct COMPOUND4res_extended {
 	COMPOUND4res res_compound4;
-	bool res_cached;
+	int32_t res_refcnt;
 };
 
 typedef union nfs_res__ {
@@ -127,8 +127,7 @@ typedef union nfs_res__ {
 	FSINFO3res res_fsinfo3;
 	PATHCONF3res res_pathconf3;
 	COMMIT3res res_commit3;
-	COMPOUND4res res_compound4;
-	struct COMPOUND4res_extended res_compound4_extended;
+	struct COMPOUND4res_extended *res_compound4_extended;
 
 	/* mount */
 	fhstatus2 res_mnt1;
@@ -170,9 +169,29 @@ typedef union nfs_res__ {
 #define MAKES_IO	0x0010	/* Request may do I/O
 				   (not allowed on MD ONLY exports */
 
+enum nfs_req_result {
+	NFS_REQ_OK,
+	NFS_REQ_DROP,
+	NFS_REQ_ERROR,
+	NFS_REQ_REPLAY,
+	NFS_REQ_ASYNC_WAIT,
+};
+
+/* Async process synchronizations flags to be used with
+ * atomic_postset_uint32_t_bits
+ */
+#define ASYNC_PROC_DONE 1
+#define ASYNC_PROC_EXIT 2
+
 typedef int (*nfs_protocol_function_t) (nfs_arg_t *,
 					struct svc_req *,
 					nfs_res_t *);
+
+typedef struct compound_data compound_data_t;
+
+typedef enum nfs_req_result (*nfs4_function_t)(struct nfs_argop4 *,
+					       compound_data_t *,
+					       struct nfs_resop4 *);
 
 typedef int (*nfsremote_protocol_function_t) (CLIENT *, nfs_arg_t *,
 					      nfs_res_t *);
@@ -191,9 +210,13 @@ typedef struct nfs_function_desc__ {
 typedef struct nfs_request {
 	struct svc_req svc;
 	struct nfs_request_lookahead lookahead;
+	struct req_op_context req_ctx;
+	struct export_perms req_export_perms;
+	struct user_cred req_user_credentials;
 	nfs_arg_t arg_nfs;
 	nfs_res_t *res_nfs;
 	const nfs_function_desc_t *funcdesc;
+	void *proc_data;
 } nfs_request_t;
 
 enum rpc_chan_type {
@@ -289,7 +312,7 @@ typedef struct nfs_client_cred__ {
  * This structure contains the necessary stuff for keeping the state
  * of a V4 compound request.
  */
-typedef struct compound_data {
+struct compound_data {
 	nfs_fh4 currentFH;	/*< Current filehandle */
 	nfs_fh4 savedFH;	/*< Saved filehandle */
 	stateid4 current_stateid;	/*< Current stateid */
@@ -308,28 +331,33 @@ typedef struct compound_data {
 	struct export_perms saved_export_perms; /*< Permissions for export for
 					       savedFH */
 	struct svc_req *req;	/*< RPC Request related to the compound */
+	nsecs_elapsed_t op_start_time;
+	nfs_argop4 *argarray;
+	nfs_res_t *res;
+	nfs_resop4 *resarray;
+	uint32_t argarray_len;
 	nfs_client_cred_t credential;	/*< Raw RPC credentials */
 	nfs_client_id_t *preserved_clientid;	/*< clientid that has lease
 						   reserved, if any */
-	struct COMPOUND4res_extended *cached_result;	/*< NFv41: pointer to
-							   cached RPC result in
-							   a session's slot */
-	bool use_slot_cached_result;	/*< Set to true if session DRC is to be
-					    used */
+	struct nfs41_session_slot__ *slot;	/*< NFv41: pointer to the
+							session's slot */
 	bool sa_cachethis;	/*< True if cachethis was specified in
 				    SEQUENCE op. */
+	nfs_opnum4 opcode;	/*< Current NFS4 OP */
 	uint32_t oppos;		/*< Position of the operation within the
 				    request processed  */
 	const char *opname;	/*< Name of the operation */
+	char *tagname;
+	void *op_data;		/*< operation specific data for resume */
 	nfs41_session_t *session;	/*< Related session
 					   (found by OP_SEQUENCE) */
 	sequenceid4 sequence;	/*< Sequence ID of the current compound
 				   (if applicable) */
-	slotid4 slot;		/*< Slot ID of the current compound
+	slotid4 slotid;		/*< Slot ID of the current compound
 				   (if applicable) */
 	uint32_t resp_size;	/*< Running total response size. */
 	uint32_t op_resp_size;	/*< Current op's response size. */
-} compound_data_t;
+};
 
 #define VARIABLE_RESP_SIZE (0)
 

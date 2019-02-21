@@ -112,6 +112,48 @@ static fsal_status_t ceph_fsal_lookup(struct fsal_obj_handle *dir_pub,
 	return fsalstat(0, 0);
 }
 
+static int
+ceph_fsal_get_sec_label(struct ceph_handle *handle, struct attrlist *attrs)
+{
+	int rc = 0;
+	struct ceph_export *export =
+		container_of(op_ctx->fsal_export, struct ceph_export, export);
+
+	if (FSAL_TEST_MASK(attrs->request_mask, ATTR4_SEC_LABEL) &&
+	    op_ctx_export_has_option(EXPORT_OPTION_SECLABEL_SET)) {
+		char label[NFS4_OPAQUE_LIMIT];
+		struct user_cred root_creds = {};
+
+		/*
+		 * It's possible that the user won't have permission to fetch
+		 * the xattrs, so use root creds to get them since it's
+		 * supposed to be part of the inode metadata.
+		 */
+		rc = fsal_ceph_ll_getxattr(export->cmount, handle->i,
+					   export->sec_label_xattr, label,
+					   NFS4_OPAQUE_LIMIT, &root_creds);
+		if (rc < 0) {
+			/* If there's no label then just do zero-length one */
+			if (rc != -ENODATA)
+				goto out_err;
+			rc = 0;
+		}
+
+		attrs->sec_label.slai_data.slai_data_len = rc;
+		gsh_free(attrs->sec_label.slai_data.slai_data_val);
+		if (rc > 0) {
+			attrs->sec_label.slai_data.slai_data_val =
+				gsh_memdup(label, rc);
+			FSAL_SET_MASK(attrs->valid_mask, ATTR4_SEC_LABEL);
+		} else {
+			attrs->sec_label.slai_data.slai_data_val = NULL;
+			FSAL_UNSET_MASK(attrs->valid_mask, ATTR4_SEC_LABEL);
+		}
+	}
+out_err:
+	return rc;
+}
+
 /**
  * @brief Read a directory
  *
@@ -187,6 +229,12 @@ static fsal_status_t ceph_fsal_readdir(struct fsal_obj_handle *dir_pub,
 
 			fsal_prepare_attrs(&attrs, attrmask);
 			ceph2fsal_attributes(&stx, &attrs);
+
+			rc = ceph_fsal_get_sec_label(obj, &attrs);
+			if (rc < 0) {
+				fsal_status = ceph2fsal_error(rc);
+				goto closedir;
+			}
 
 			cb_rc = cb(de.d_name, &obj->handle, &attrs, dir_state,
 					de.d_off);
@@ -288,6 +336,14 @@ static fsal_status_t ceph_fsal_mkdir(struct fsal_obj_handle *dir_hdl,
 				     fsal_err_txt(status));
 			(*new_obj)->obj_ops->release(*new_obj);
 			*new_obj = NULL;
+		} else if (attrs_out != NULL) {
+			/*
+			 * We ignore errors here. The mkdir and setattr
+			 * succeeded, so we don't want to return error if the
+			 * getattrs fails. We'll just return no attributes
+			 * in that case.
+			 */
+			(*new_obj)->obj_ops->getattrs(*new_obj, attrs_out);
 		}
 	} else {
 		status = fsalstat(ERR_FSAL_NO_ERROR, 0);
@@ -577,18 +633,21 @@ static fsal_status_t ceph_fsal_getattrs(struct fsal_obj_handle *handle_pub,
 
 	rc = fsal_ceph_ll_getattr(export->cmount, handle->i, &stx,
 				CEPH_STATX_ATTR_MASK, op_ctx->creds);
-	LogDebug(COMPONENT_FSAL, "getattr returned %d", rc);
-	if (rc < 0) {
-		if (attrs->request_mask & ATTR_RDATTR_ERR) {
-			/* Caller asked for error to be visible. */
-			attrs->valid_mask = ATTR_RDATTR_ERR;
-		}
-		return ceph2fsal_error(rc);
-	}
+	if (rc < 0)
+		goto out_err;
+
+	rc = ceph_fsal_get_sec_label(handle, attrs);
+	if (rc < 0)
+		goto out_err;
 
 	ceph2fsal_attributes(&stx, attrs);
-
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+out_err:
+	if (attrs->request_mask & ATTR_RDATTR_ERR) {
+		/* Caller asked for error to be visible. */
+		attrs->valid_mask = ATTR_RDATTR_ERR;
+	}
+	return ceph2fsal_error(rc);
 }
 
 /**
@@ -1154,7 +1213,7 @@ static fsal_status_t ceph_fsal_open2(struct fsal_obj_handle *obj_hdl,
 			}
 		} else if (attrs_out && attrs_out->request_mask &
 			   ATTR_RDATTR_ERR) {
-			attrs_out->valid_mask &= ATTR_RDATTR_ERR;
+			attrs_out->valid_mask = ATTR_RDATTR_ERR;
 		}
 
 		if (state == NULL) {
@@ -1697,13 +1756,6 @@ static void ceph_fsal_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 	struct ceph_fd *ceph_fd = NULL;
 	uint64_t offset = write_arg->offset;
 
-	if (write_arg->info != NULL) {
-		/* Currently we don't support WRITE_PLUS */
-		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), write_arg,
-			caller_arg);
-		return;
-	}
-
 	/* Acquire state's fdlock to prevent OPEN upgrade closing the
 	 * file descriptor while we use it.
 	 */
@@ -2045,8 +2097,8 @@ static void ceph_deleg_cb(Fh *fh, void *vhdl)
 	struct ceph_handle *hdl =
 		container_of(obj_hdl, struct ceph_handle, handle);
 	struct gsh_buffdesc key = {
-		.addr = &hdl->vi,
-		.len = sizeof(vinodeno_t)
+		.addr = &hdl->key,
+		.len = sizeof(hdl->key)
 	};
 
 	LogDebug(COMPONENT_FSAL, "Recalling delegations on %p", hdl);
@@ -2290,12 +2342,23 @@ static fsal_status_t ceph_fsal_setattr2(struct fsal_obj_handle *obj_hdl,
 		LogDebug(COMPONENT_FSAL,
 			 "setattrx returned %s (%d)",
 			 strerror(-rc), -rc);
-		status = ceph2fsal_error(rc);
-	} else {
-		/* Success */
-		status = fsalstat(ERR_FSAL_NO_ERROR, 0);
+		goto out;
 	}
 
+	if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR4_SEC_LABEL)) {
+		rc = fsal_ceph_ll_setxattr(export->cmount, myself->i,
+				export->sec_label_xattr,
+				attrib_set->sec_label.slai_data.slai_data_val,
+				attrib_set->sec_label.slai_data.slai_data_len,
+				0, op_ctx->creds);
+		if (rc < 0) {
+			status = ceph2fsal_error(rc);
+			goto out;
+		}
+	}
+
+	/* Success */
+	status = fsalstat(ERR_FSAL_NO_ERROR, 0);
  out:
 
 	if (has_lock)
@@ -2321,6 +2384,7 @@ static fsal_status_t ceph_fsal_setattr2(struct fsal_obj_handle *obj_hdl,
 static fsal_status_t ceph_fsal_close2(struct fsal_obj_handle *obj_hdl,
 				      struct state_t *state)
 {
+	fsal_status_t status = {0, 0};
 	struct ceph_handle *myself =
 		container_of(obj_hdl, struct ceph_handle, handle);
 	struct ceph_fd *my_fd = &container_of(state, struct ceph_state_fd,
@@ -2341,7 +2405,14 @@ static fsal_status_t ceph_fsal_close2(struct fsal_obj_handle *obj_hdl,
 		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
 	}
 
-	return ceph_close_my_fd(myself, my_fd);
+	/* Acquire state's fdlock to make sure no other thread
+	 * is operating on the fd while we close it.
+	 */
+	PTHREAD_RWLOCK_wrlock(&my_fd->fdlock);
+	status = ceph_close_my_fd(myself, my_fd);
+	PTHREAD_RWLOCK_unlock(&my_fd->fdlock);
+
+	return status;
 }
 
 /**
@@ -2371,14 +2442,17 @@ ceph_fsal_handle_to_wire(const struct fsal_obj_handle *handle_pub,
 		/* Digested Handles */
 	case FSAL_DIGEST_NFSV3:
 	case FSAL_DIGEST_NFSV4:
-		if (fh_desc->len < sizeof(handle->vi)) {
+		if (fh_desc->len < sizeof(handle->key)) {
 			LogMajor(COMPONENT_FSAL,
 				 "digest_handle: space too small for handle.  Need %zu, have %zu",
-				 sizeof(vinodeno_t), fh_desc->len);
+				 sizeof(handle->key), fh_desc->len);
 			return fsalstat(ERR_FSAL_TOOSMALL, 0);
 		} else {
-			memcpy(fh_desc->addr, &handle->vi, sizeof(vinodeno_t));
-			fh_desc->len = sizeof(handle->vi);
+			if (handle->key.chk_fscid)
+				fh_desc->len = sizeof(handle->key);
+			else
+				fh_desc->len = sizeof(handle->key.chk_vi);
+			memcpy(fh_desc->addr, &handle->key, fh_desc->len);
 		}
 		break;
 
@@ -2406,8 +2480,8 @@ ceph_fsal_handle_to_key(struct fsal_obj_handle *handle_pub,
 	struct ceph_handle *handle =
 		container_of(handle_pub, struct ceph_handle, handle);
 
-	fh_desc->addr = &handle->vi;
-	fh_desc->len = sizeof(vinodeno_t);
+	fh_desc->addr = &handle->key;
+	fh_desc->len = sizeof(handle->key);
 }
 
 #ifdef USE_CEPH_LL_FALLOCATE

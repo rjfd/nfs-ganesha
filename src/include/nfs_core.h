@@ -100,25 +100,7 @@ typedef enum request_type {
 #endif				/* _USE_9P */
 } request_type_t;
 
-typedef struct request_data {
-	union request_content {
-		rpc_call_t call;
-		nfs_request_t req;
-#ifdef _USE_9P
-		struct _9p_request_data _9p;
-#endif
-	} r_u;
-
-	struct glist_head req_q;	/* chaining of pending requests */
-	struct timespec time_queued;	/*< The time at which a request was
-					 *  added to the worker thread queue.
-					 */
-	request_type_t rtype;
-} request_data_t;
-
 /* in nfs_init.c */
-
-extern pool_t *nfs_request_pool;
 
 struct _nfs_health {
 	uint64_t enqueued_reqs;
@@ -150,7 +132,7 @@ int _9p_process_buffer(struct _9p_request_data *req9p, char *replydata,
 
 int _9p_worker_init(void);
 int _9p_worker_shutdown(void);
-void DispatchWork9P(request_data_t *req);
+void DispatchWork9P(struct _9p_request_data *req);
 #endif
 
 #ifdef _USE_9P_RDMA

@@ -77,7 +77,8 @@ enum config_type {
 	CONFIG_BOOLBIT,
 	CONFIG_IP_ADDR,
 	CONFIG_BLOCK,
-	CONFIG_PROC
+	CONFIG_PROC,
+	CONFIG_DEPRECATED,
 };
 
 #define CONFIG_UNIQUE		0x001  /*< only one instance allowed */
@@ -112,6 +113,7 @@ struct config_error_type {
 	bool exists:1;		/*< block already exists */
 	bool internal:1;        /*< internal error */
 	bool bogus:1;		/*< bogus (deprecated?) param */
+	bool deprecated:1;	/*< A config item identified as deprecated */
 	bool dispose:1;		/*< Not actually an error, but we need to
 				    dispose of the config item anyway. */
 	uint32_t errors;	/*< cumulative error count for parse+proc */
@@ -359,6 +361,9 @@ struct config_item {
 				       void *cnode,
 				       struct config_error_type *err_type);
 		} proc;
+		struct { /* CONFIG_DEPRECATED */
+			const char *message;
+		} deprecated;
 	} u;
 	size_t off; /* offset into struct pointed to by opaque_dest */
 };
@@ -589,6 +594,7 @@ struct config_item {
 	  .u.str.def = _def_,			    \
 	  .off = offsetof(struct _struct_, _mem_)   \
 	}
+
 #define CONF_MAND_STR(_name_, _minsize_, _maxsize_, _def_, _struct_, _mem_) \
 	{ .name = _name_,			    \
 	  .type = CONFIG_STRING,		    \
@@ -761,6 +767,15 @@ struct config_item {
 	  .off = offsetof(struct _struct_, _mem_)   \
 	}
 
+/**
+ * Note that message can be NULL.
+ */
+#define CONF_ITEM_DEPRECATED(_name_, _message_) \
+	{ .name = _name_,			    \
+	  .type = CONFIG_DEPRECATED,		    \
+	  .u.deprecated.message = _message_,	    \
+	}
+
 #define CONFIG_EOL {.name = NULL, .type = CONFIG_NULL}
 
 /**
@@ -834,6 +849,12 @@ void config_Free(config_file_t config);
 
 /* Find the root of the parse tree given a TYPE_BLOCK node */
 config_file_t get_parse_root(void *node);
+
+/* Get generation of given config_root */
+uint64_t get_config_generation(struct config_root *root);
+
+/* Get the generation of the config tree from config_node */
+uint64_t get_parse_root_generation(void *node);
 
 struct config_node_list {
 	void *tree_node;

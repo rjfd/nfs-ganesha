@@ -46,9 +46,6 @@ MNT_Program(uint32, range 1 to INT32_MAX, default 100005)
 NLM_Program(uint32, range 1 to INT32_MAX, default 100021)
     RPC program number for NLM.
 
-Nb_Worker(uint32, range 1 to 1024*128, default 256)
-    Number of worker threads.
-
 Drop_IO_Errors(bool, default false)
     For NFSv3, whether to drop rather than reply to requests yielding I/O
     errors. It results in client retry.
@@ -76,6 +73,16 @@ Enable_Fast_Stats(bool, default false)
 Enable_FSAL_Stats(bool, default false)
     Whether to count and collect FSAL specific performance statistics.
     Enable_FSAL_Stats can be enabled or disabled dynamically via ganesha_stats
+
+Enable_FULLV3_Stats(bool, default false)
+    Whether to count and collect "detailed statistics" for NFSv3.
+    Enable_FULLV3_Stats can be enabled or disabled dynamically via
+    ganesha_stats.
+
+Enable_FULLV4_Stats(bool, default false)
+    Whether to count and collect "detailed statistics" for NFSv4.
+    Enable_FULLV4_Stats can be enabled or disabled dynamically via
+    ganesha_stats.
 
 Short_File_Handle(bool, default false)
     Whether to use short NFS file handle to accommodate VMware NFS client.
@@ -125,6 +132,10 @@ Dbus_Name_Prefix
     DBus name prefix. Required if one wants to run multiple ganesha instances on
     single host. The prefix should be different for every ganesha instance. If
     this is set, the dbus name will be <prefix>.org.ganesha.nfsd
+
+Enable_UDP(bool, default true)
+    Whether to create UDP listeners for NFS, NLM, RQUOTA, and register
+    them with portmapper. Set to false, e.g., to run as non-root.
 
 Parameters controlling TCP DRC behavior:
 ----------------------------------------
@@ -324,3 +335,15 @@ grace_oid(string, default "grace")
 
 nodeid(string, default result of gethostname())
     Unique node identifier within rados_cluster
+
+RADOS_URLS {}
+--------------------------------------------------------------------------------
+ceph_conf(string, no default)
+    Connection to ceph cluster, should be file path for ceph configuration.
+
+userid(path, no default)
+    User ID to ceph cluster.
+
+watch_url(url, no default)
+    rados:// URL to watch for notifications of config changes. When a
+    notification is received, the server will issue a SIGHUP to itself.

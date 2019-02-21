@@ -406,12 +406,15 @@ struct _9p_rdma_priv {
 #endif
 
 struct _9p_request_data {
+	struct glist_head req_q;	/* chaining of pending requests */
 	char *_9pmsg;
 	struct _9p_conn *pconn;
 #ifdef _USE_9P_RDMA
 	msk_data_t *data;
 #endif
 	struct _9p_flush_hook flush_hook;
+	pthread_mutex_t *mutex;
+	pthread_cond_t *cond;
 };
 
 typedef int (*_9p_function_t) (struct _9p_request_data *req9p,
@@ -634,6 +637,9 @@ do {                                                   \
  */
 
 struct _9p_param {
+	/** Number of worker threads.  Set to NB_WORKER_DEFAULT by
+	    default and changed with the Nb_Worker option. */
+	uint32_t nb_worker;
 	/** TCP port for 9p operations.  Defaults to _9P_TCP_PORT,
 	    settable by _9P_TCP_Port */
 	uint16_t _9p_tcp_port;

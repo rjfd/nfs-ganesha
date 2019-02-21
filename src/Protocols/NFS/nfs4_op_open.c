@@ -120,6 +120,7 @@ static nfsstat4 open4_create_fh(compound_data_t *data,
  *
  * @param[in]  data         Compound's data
  * @param[in]  claim        Claim type
+ * @param[out] grace_ref    Did this function acquire a grace reference?
  *
  * @retval NFS4_OK claim is valid.
  * @retval NFS4ERR_GRACE new open not allowed in grace period.
@@ -131,32 +132,27 @@ static nfsstat4 open4_create_fh(compound_data_t *data,
 
 static nfsstat4 open4_validate_claim(compound_data_t *data,
 				     open_claim_type4 claim,
-				     nfs_client_id_t *clientid)
+				     nfs_client_id_t *clientid,
+				     bool *grace_ref)
 {
 	/* Return code */
 	nfsstat4 status = NFS4_OK;
-	/* Indicate if we let FSAL to handle requests during grace. */
-	bool_t fsal_grace = false;
-
-	/* Pick off erroneous claims so we don't have to deal with
-	   them later. */
+	/* does this claim require a grace period? */
+	bool want_grace = false;
+	/* do we need a reference on the current state of grace? */
+	bool take_ref = !op_ctx->fsal_export->exp_ops.fs_supports(
+					op_ctx->fsal_export, fso_grace_method);
 
 	switch (claim) {
 	case CLAIM_NULL:
-		if (nfs_in_grace() || ((data->minorversion > 0)
-		    && !clientid->cid_cb.v41.cid_reclaim_complete))
+		if ((data->minorversion > 0)
+		    && !clientid->cid_cb.v41.cid_reclaim_complete)
 			status = NFS4ERR_GRACE;
 		break;
 
 	case CLAIM_FH:
 		if (data->minorversion == 0)
 			status = NFS4ERR_NOTSUPP;
-
-		if (op_ctx->fsal_export->exp_ops.fs_supports(
-					op_ctx->fsal_export, fso_grace_method))
-			fsal_grace = true;
-		if (!fsal_grace && nfs_in_grace())
-			status = NFS4ERR_GRACE;
 		break;
 
 	case CLAIM_DELEGATE_PREV:
@@ -164,16 +160,23 @@ static nfsstat4 open4_validate_claim(compound_data_t *data,
 		break;
 
 	case CLAIM_PREVIOUS:
-		if (!clientid->cid_allow_reclaim || !nfs_in_grace()
-		    || ((data->minorversion > 0)
-		    && clientid->cid_cb.v41.cid_reclaim_complete))
+		want_grace = true;
+		if (!clientid->cid_allow_reclaim ||
+		    ((data->minorversion > 0) &&
+		    clientid->cid_cb.v41.cid_reclaim_complete))
 			status = NFS4ERR_NO_GRACE;
 		break;
 
 	case CLAIM_DELEGATE_CUR:
+		take_ref = false;
 		break;
 
 	case CLAIM_DELEG_CUR_FH:
+		take_ref = false;
+		if (data->minorversion == 0)
+			status = NFS4ERR_NOTSUPP;
+		break;
+
 	case CLAIM_DELEG_PREV_FH:
 		status = NFS4ERR_NOTSUPP;
 		break;
@@ -182,6 +185,18 @@ static nfsstat4 open4_validate_claim(compound_data_t *data,
 		status = NFS4ERR_INVAL;
 	}
 
+	if (status == NFS4_OK) {
+		if (take_ref) {
+			if (nfs_get_grace_status(want_grace)) {
+				*grace_ref = true;
+			} else {
+				status = want_grace ? NFS4ERR_NO_GRACE :
+						      NFS4ERR_GRACE;
+			}
+		} else {
+			*grace_ref = false;
+		}
+	}
 	return status;
 }
 
@@ -339,7 +354,15 @@ static nfsstat4 open4_claim_deleg(OPEN4args *arg, compound_data_t *data)
 		return NFS4ERR_NOTSUPP;
 	}
 
-	assert(claim == CLAIM_DELEGATE_CUR);
+	assert((claim  == CLAIM_DELEGATE_CUR) ||
+	       (claim == CLAIM_DELEG_CUR_FH));
+
+	if (claim == CLAIM_DELEG_CUR_FH) {
+		rcurr_state =
+			&arg->claim.open_claim4_u.oc_delegate_stateid;
+		goto find_state;
+	}
+
 	utfname = &arg->claim.open_claim4_u.delegate_cur_info.file;
 	rcurr_state =
 		&arg->claim.open_claim4_u.delegate_cur_info.delegate_stateid;
@@ -371,6 +394,7 @@ static nfsstat4 open4_claim_deleg(OPEN4args *arg, compound_data_t *data)
 		return status;
 	}
 
+find_state:
 	found_state = nfs4_State_Get_Pointer(rcurr_state->other);
 
 	if (found_state == NULL) {
@@ -378,6 +402,7 @@ static nfsstat4 open4_claim_deleg(OPEN4args *arg, compound_data_t *data)
 			 "state not found with CLAIM_DELEGATE_CUR");
 		return NFS4ERR_BAD_STATEID;
 	} else {
+		/* FIXME: vet stateid here */
 		if (isFullDebug(COMPONENT_NFS_V4)) {
 			char str[LOG_BUFF_LEN] = "\0";
 			struct display_buffer dspbuf = {sizeof(str), str, str};
@@ -444,7 +469,7 @@ static void get_delegation(compound_data_t *data, OPEN4args *args,
 		       data->session->session_id,
 		       sizeof(sessionid4));
 		refer.sequence = data->sequence;
-		refer.slot = data->slot;
+		refer.slot = data->slotid;
 	}
 
 	if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
@@ -512,6 +537,11 @@ static void get_delegation(compound_data_t *data, OPEN4args *args,
 		readres->recall = prerecall;
 		get_deleg_perm(&readres->permissions, deleg_type);
 	}
+
+	new_state->state_data.deleg.share_access =
+		args->share_access & OPEN4_SHARE_ACCESS_BOTH;
+	new_state->state_data.deleg.share_deny =
+		args->share_deny;
 
 	if (isDebug(COMPONENT_NFS_V4_LOCK)) {
 		char str1[LOG_BUFF_LEN / 2] = "\0";
@@ -833,6 +863,7 @@ static void open4_ex(OPEN4args *arg,
 		goto out;
 
 	case CLAIM_DELEGATE_CUR:
+	case CLAIM_DELEG_CUR_FH:
 		res_OPEN4->status = open4_claim_deleg(arg, data);
 		if (res_OPEN4->status != NFS4_OK)
 			goto out;
@@ -885,9 +916,11 @@ static void open4_ex(OPEN4args *arg,
 		/* Check if any existing delegations conflict with this open.
 		 * Delegation recalls will be scheduled if there is a conflict.
 		 */
-		if (state_deleg_conflict(file_obj,
-					  (arg->share_access &
-					   OPEN4_SHARE_ACCESS_WRITE) != 0)) {
+		if (arg->claim.claim != CLAIM_DELEGATE_CUR &&
+		    arg->claim.claim != CLAIM_DELEG_CUR_FH &&
+		    state_deleg_conflict_impl(file_obj,
+					     (arg->share_access &
+					      OPEN4_SHARE_ACCESS_WRITE) != 0)) {
 			res_OPEN4->status = NFS4ERR_DELAY;
 			goto out;
 		}
@@ -1036,7 +1069,7 @@ static void open4_ex(OPEN4args *arg,
 			       data->session->session_id,
 			       sizeof(sessionid4));
 			refer.sequence = data->sequence;
-			refer.slot = data->slot;
+			refer.slot = data->slotid;
 			p_refer = &refer;
 		}
 
@@ -1175,8 +1208,8 @@ static void open4_ex(OPEN4args *arg,
  * @return per RFC5661, pp. 369-70
  */
 
-int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
-		 struct nfs_resop4 *resp)
+enum nfs_req_result nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
+				 struct nfs_resop4 *resp)
 {
 	/* Shorter alias for OPEN4 arguments */
 	OPEN4args * const arg_OPEN4 = &(op->nfs_argop4_u.opopen);
@@ -1203,6 +1236,8 @@ int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
 	state_t *file_state = NULL;
 	/* True if the state was newly created */
 	bool new_state = false;
+	/* True if a grace reference was taken */
+	bool grace_ref = false;
 	int retval;
 
 	LogDebug(COMPONENT_STATE,
@@ -1229,7 +1264,7 @@ int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
 		LogDebug(COMPONENT_NFS_V4,
 			 "Status of OP_OPEN due to export permissions = %s",
 			 nfsstat4_to_str(res_OPEN4->status));
-		return res_OPEN4->status;
+		return NFS_REQ_ERROR;
 	}
 
 	/* Check export permissions if OPEN4_SHARE_ACCESS_WRITE */
@@ -1242,14 +1277,14 @@ int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
 			 "Status of OP_OPEN due to export permissions = %s",
 			 nfsstat4_to_str(res_OPEN4->status));
 
-		return res_OPEN4->status;
+		return NFS_REQ_ERROR;
 	}
 
 	/* Do basic checks on a filehandle */
 	res_OPEN4->status = nfs4_sanity_check_FH(data, NO_FILE_TYPE, false);
 
 	if (res_OPEN4->status != NFS4_OK)
-		return res_OPEN4->status;
+		return NFS_REQ_ERROR;
 
 	if (data->current_obj == NULL) {
 		/* This should be impossible, as PUTFH fills in the
@@ -1260,7 +1295,7 @@ int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
 		LogCrit(COMPONENT_NFS_V4,
 			"Impossible condition in compound data at %s:%u.",
 			__FILE__, __LINE__);
-		goto out3;
+		return NFS_REQ_ERROR;
 	}
 
 	/* It this a known client id? */
@@ -1278,7 +1313,7 @@ int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
 		res_OPEN4->status = clientid_error_to_nfsstat(retval);
 		LogDebug(COMPONENT_NFS_V4,
 			 "nfs_client_id_get_confirmed failed");
-		return res_OPEN4->status;
+		return NFS_REQ_ERROR;
 	}
 
 	/* Check if lease is expired and reserve it */
@@ -1302,8 +1337,8 @@ int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
 	/* Do the claim check here, so we can save the result in the
 	 * owner for NFSv4.0.
 	 */
-	res_OPEN4->status = open4_validate_claim(data, claim, clientid);
-
+	res_OPEN4->status = open4_validate_claim(data, claim, clientid,
+						 &grace_ref);
 	if (res_OPEN4->status != NFS4_OK) {
 		LogDebug(COMPONENT_NFS_V4, "open4_validate_claim failed");
 		goto out;
@@ -1410,6 +1445,8 @@ int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
 	}
 
  out2:
+	if (grace_ref)
+		nfs_put_grace_status();
 
 	/* Update the lease before exit */
 	if (data->minorversion == 0) {
@@ -1440,7 +1477,7 @@ int nfs4_op_open(struct nfs_argop4 *op, compound_data_t *data,
 
 	dec_client_id_ref(clientid);
 
-	return res_OPEN4->status;
+	return nfsstat4_to_nfs_req_result(res_OPEN4->status);
 }				/* nfs4_op_open */
 
 /**

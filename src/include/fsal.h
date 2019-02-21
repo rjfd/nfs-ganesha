@@ -269,17 +269,6 @@ typedef fsal_errors_t (*helper_readdir_cb)
 	 enum cb_state cb_state);
 
 /**
- * Indicate whether this is a read or write operation, for fsal_rdwr.
- */
-
-typedef enum io_direction__ {
-	FSAL_IO_READ = 1,		/*< Reading */
-	FSAL_IO_WRITE = 2,		/*< Writing */
-	FSAL_IO_READ_PLUS = 3,	/*< Reading plus */
-	FSAL_IO_WRITE_PLUS = 4	/*< Writing plus */
-} fsal_io_direction_t;
-
-/**
  * @brief Type of callback for fsal_readdir
  *
  * This callback provides the upper level protocol handling function
@@ -479,6 +468,10 @@ static inline void fsal_release_attrs(struct attrlist *attrs)
 		attrs->fs_locations = NULL;
 		attrs->valid_mask &= ~ATTR4_FS_LOCATIONS;
 	}
+
+	attrs->sec_label.slai_data.slai_data_len = 0;
+	gsh_free(attrs->sec_label.slai_data.slai_data_val);
+	attrs->sec_label.slai_data.slai_data_val = NULL;
 }
 
 /**
@@ -530,6 +523,25 @@ static inline void fsal_copy_attrs(struct attrlist *dest,
 	} else {
 		dest->fs_locations = NULL;
 		dest->valid_mask &= ~ATTR4_FS_LOCATIONS;
+	}
+
+	/*
+	 * Ditto for security label. Here though, we just make a copy if
+	 * needed.
+	 */
+	if (pass_refs && ((save_request_mask & ATTR4_SEC_LABEL) != 0)) {
+		src->sec_label.slai_data.slai_data_len = 0;
+		src->sec_label.slai_data.slai_data_val = NULL;
+		src->valid_mask &= ~ATTR4_SEC_LABEL;
+	} else if (dest->sec_label.slai_data.slai_data_val != NULL &&
+		((save_request_mask & ATTR4_SEC_LABEL) != 0)) {
+		dest->sec_label.slai_data.slai_data_val = (char *)
+			gsh_memdup(dest->sec_label.slai_data.slai_data_val,
+				   dest->sec_label.slai_data.slai_data_len);
+	} else {
+		dest->sec_label.slai_data.slai_data_len = 0;
+		dest->sec_label.slai_data.slai_data_val = NULL;
+		dest->valid_mask &= ~ATTR4_SEC_LABEL;
 	}
 }
 
@@ -639,6 +651,28 @@ struct fsal_stats {
 	uint16_t total_ops;
 	struct fsal_op_stats *op_stats;
 };
+
+/* Async Processes that will be made synchronous */
+struct async_process_data {
+	/** Return from process */
+	fsal_status_t ret;
+	/** Indicator callback is done. */
+	bool done;
+	/** Mutex to protect done and condition variable. */
+	pthread_mutex_t *mutex;
+	/** Condition variable to signal callback is done. */
+	pthread_cond_t *cond;
+};
+
+extern void fsal_read(struct fsal_obj_handle *obj_hdl,
+		      bool bypass,
+		      struct fsal_io_arg *arg,
+		      struct async_process_data *data);
+
+extern void fsal_write(struct fsal_obj_handle *obj_hdl,
+		       bool bypass,
+		       struct fsal_io_arg *arg,
+		       struct async_process_data *data);
 
 #endif				/* !FSAL_H */
 /** @} */

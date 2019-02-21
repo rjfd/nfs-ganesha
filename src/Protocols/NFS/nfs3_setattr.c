@@ -105,19 +105,6 @@ int nfs3_setattr(nfs_arg_t *arg, struct svc_req *req, nfs_res_t *res)
 		goto out;
 	}
 
-	/* Don't allow attribute change while we are in grace period.
-	 * Required for delegation reclaims and may be needed for other
-	 * reclaimable states as well. No NFS4ERR_GRACE in NFS v3, so
-	 * send jukebox error.
-	 */
-	if (nfs_in_grace()) {
-		res->res_setattr3.status = NFS3ERR_JUKEBOX;
-		rc = NFS_REQ_OK;
-		LogFullDebug(COMPONENT_NFSPROTO,
-			     "nfs_in_grace is true");
-		goto out;
-	}
-
 	nfs_SetPreOpAttr(obj, &pre_attr);
 
 	if (arg->arg_setattr3.guard.check) {
@@ -160,20 +147,24 @@ int nfs3_setattr(nfs_arg_t *arg, struct svc_req *req, nfs_res_t *res)
 		 */
 		squash_setattr(&setattr);
 
-		if (arg->arg_setattr3.new_attributes.size.set_it) {
-			/* Check for delegation conflict. */
-			if (state_deleg_conflict(obj, true)) {
-				res->res_setattr3.status = NFS3ERR_JUKEBOX;
-				LogFullDebug(COMPONENT_NFSPROTO,
-					     "state_share_anonymous_io_start failed");
-				goto out_fail;
-			}
+		/* Don't allow attribute change while we are in grace period.
+		 * Required for delegation reclaims and may be needed for other
+		 * reclaimable states as well. No NFS4ERR_GRACE in NFS v3, so
+		 * send jukebox error.
+		 */
+		if (!nfs_get_grace_status(false)) {
+			res->res_setattr3.status = NFS3ERR_JUKEBOX;
+			rc = NFS_REQ_OK;
+			LogFullDebug(COMPONENT_NFSPROTO,
+				     "nfs_in_grace is true");
+			goto out;
 		}
 
 		/* For now we don't look for states, so indicate bypass so
 		 * we will get through an NLM_SHARE with deny.
 		 */
 		fsal_status = fsal_setattr(obj, true, NULL, &setattr);
+		nfs_put_grace_status();
 
 		if (FSAL_IS_ERROR(fsal_status)) {
 			res->res_setattr3.status =

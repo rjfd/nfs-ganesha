@@ -739,6 +739,24 @@ typedef nfsacl41 fattr4_dacl;
 typedef nfsacl41 fattr4_sacl;
 
 typedef change_policy4 fattr4_change_policy;
+
+typedef uint32_t  policy4;
+
+struct labelformat_spec4 {
+	policy4	lfs_lfs;
+	policy4	lfs_pi;
+};
+
+struct sec_label4 {
+	struct labelformat_spec4	slai_lfs;
+	struct {
+		u_int	slai_data_len;
+		char	*slai_data_val;
+	} slai_data;
+};
+
+typedef struct sec_label4 fattr4_sec_label;
+
 /*
  * REQUIRED Attributes
  */
@@ -1446,10 +1464,12 @@ typedef struct nfs_space_limit4 nfs_space_limit4;
 #define OPEN4_SHARE_ACCESS_READ 0x00000001
 #define OPEN4_SHARE_ACCESS_WRITE 0x00000002
 #define OPEN4_SHARE_ACCESS_BOTH 0x00000003
+#define OPEN4_SHARE_ACCESS_ALL 0x00000004
 #define OPEN4_SHARE_DENY_NONE 0x00000000
 #define OPEN4_SHARE_DENY_READ 0x00000001
 #define OPEN4_SHARE_DENY_WRITE 0x00000002
 #define OPEN4_SHARE_DENY_BOTH 0x00000003
+#define OPEN4_SHARE_DENY_ALL  0x00000004
 #define OPEN4_SHARE_ACCESS_WANT_DELEG_MASK 0xFF00
 #define OPEN4_SHARE_ACCESS_WANT_NO_PREFERENCE 0x0000
 #define OPEN4_SHARE_ACCESS_WANT_READ_DELEG 0x0100
@@ -3197,7 +3217,7 @@ struct nfs_argop4 {
 		COPY4args opcopy;
 		OFFLOAD_ABORT4args opoffload_abort;
 		OFFLOAD_STATUS4args opoffload_status;
-		WRITE_SAME4args opwrite_plus;
+		WRITE_SAME4args opwrite_same;
 		ALLOCATE4args opallocate;
 		DEALLOCATE4args opdeallocate;
 		READ_PLUS4args opread_plus;
@@ -3282,7 +3302,7 @@ struct nfs_resop4 {
 		COPY4res opcopy;
 		OFFLOAD_ABORT4res opoffload_abort;
 		OFFLOAD_STATUS4res opoffload_status;
-		WRITE_SAME4res opwrite_plus;
+		WRITE_SAME4res opwrite_same;
 		ALLOCATE4res opallocate;
 		DEALLOCATE4res opdeallocate;
 		READ_PLUS4res opread_plus;
@@ -4010,6 +4030,19 @@ static inline bool xdr_change_policy4(XDR *xdrs, change_policy4 *objp)
 	if (!inline_xdr_u_int64_t(xdrs, &objp->cp_major))
 		return false;
 	if (!inline_xdr_u_int64_t(xdrs, &objp->cp_minor))
+		return false;
+	return true;
+}
+
+static inline bool xdr_sec_label4(XDR *xdrs, fattr4_sec_label *objp)
+{
+	if (!inline_xdr_u_int32_t(xdrs, &objp->slai_lfs.lfs_lfs))
+		return false;
+	if (!inline_xdr_u_int32_t(xdrs, &objp->slai_lfs.lfs_pi))
+		return false;
+	if (!inline_xdr_bytes(xdrs, &objp->slai_data.slai_data_val,
+				&objp->slai_data.slai_data_len,
+				XDR_ARRAY_MAXLEN))
 		return false;
 	return true;
 }
@@ -8311,7 +8344,7 @@ static inline bool xdr_nfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 	/* NFSv4.2 */
 	case NFS4_OP_WRITE_SAME:
 		if (!xdr_WRITE_SAME4args(xdrs,
-				&objp->nfs_argop4_u.opwrite_plus))
+				&objp->nfs_argop4_u.opwrite_same))
 			return false;
 		lkhd->flags |= NFS_LOOKAHEAD_WRITE;
 		(lkhd->write)++;
@@ -8650,7 +8683,7 @@ static inline bool xdr_nfs_resop4(XDR *xdrs, nfs_resop4 *objp)
 
 	/* NFSv4.2 */
 	case NFS4_OP_WRITE_SAME:
-		if (!xdr_WRITE_SAME4res(xdrs, &objp->nfs_resop4_u.opwrite_plus))
+		if (!xdr_WRITE_SAME4res(xdrs, &objp->nfs_resop4_u.opwrite_same))
 			return false;
 		break;
 	case NFS4_OP_READ_PLUS:

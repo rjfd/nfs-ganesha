@@ -17,7 +17,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/modules/")
 project(nfs-ganesha C CXX)
 # Project versioning
 set(GANESHA_MAJOR_VERSION 2)
-set(GANESHA_MINOR_VERSION 7)
+set(GANESHA_MINOR_VERSION 8)
 
 IF(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
 set(GANESHA_BUILD_RELEASE 1)
@@ -39,13 +39,13 @@ ENDIF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OR CMAKE_INSTALL_PREFIX STREQU
 # Patch level is always ".0" for mainline (master).  It is blank for development.
 # When starting a stable maintenance branch, this becomes ".N"
 # where N is monotonically increasing starting at 1. Remember to include the "." !!
-set(GANESHA_PATCH_LEVEL .1)
+set(GANESHA_PATCH_LEVEL )
 
 
 # Extra version is for naming development/RC.  It is blank in master/stable branches
 # so it can be available to end-users to name local variants/versions
 # If used, it is always of the form "-whateveryouwant"
-set(GANESHA_EXTRA_VERSION )
+set(GANESHA_EXTRA_VERSION -dev.18)
 
 set(GANESHA_VERSION ${GANESHA_MAJOR_VERSION}.${GANESHA_MINOR_VERSION}${GANESHA_PATCH_LEVEL}${GANESHA_EXTRA_VERSION})
 set(GANESHA_BASE_VERSION ${GANESHA_MAJOR_VERSION}.${GANESHA_MINOR_VERSION}${GANESHA_PATCH_LEVEL})
@@ -170,6 +170,7 @@ endif(FREEBSD)
 if (LINUX)
     set(PLATFORM "LINUX")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-strict-aliasing")
     set(OS_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include/os/linux")
     find_library(LIBDL dl)  # module loader
 endif(LINUX)
@@ -699,6 +700,13 @@ if(USE_FSAL_GLUSTER)
         set(USE_GLUSTER_UPCALL_REGISTER OFF)
         message(STATUS "Could not find glfs_upcall_register, switching to glfs_h_poll_upcall")
     endif(HAVE_REGISTER_UPCALL)
+    check_library_exists(gfapi glfs_upcall_lease_get_object ${GFAPI_LIBDIR} HAVE_DELEG)
+    if(HAVE_DELEG)
+        set(USE_GLUSTER_DELEGATION ON)
+    else()
+        set(USE_GLUSTER_DELEGATION OFF)
+        message(STATUS "Could not find glfs_upcall_lease_get_object, switching off delegations")
+    endif(HAVE_DELEG)
   endif(USE_FSAL_GLUSTER)
 endif(USE_FSAL_GLUSTER)
 
@@ -875,6 +883,22 @@ if (HAVE_KRB5)
     )
 endif (HAVE_KRB5)
 
+# check for d_off support, FreeBSD doesn't support it before 1200500
+if(LINUX)
+  add_definitions(-DHAS_DOFF)
+elseif(FREEBSD)
+  EXECUTE_PROCESS(
+    COMMAND uname -K
+    OUTPUT_VARIABLE FREEBSD_VERSION
+    ERROR_QUIET
+  )
+  if (FREEBSD_VERSION GREATER 1200500)
+    add_definitions(-DHAS_DOFF)
+  endif()
+else() # d_off is on by default for other cases
+  add_definitions(-DHAS_DOFF)
+endif()
+
 # Fixup loose bits of autotools legacy
 set(_USE_9P ${USE_9P})
 set(_USE_9P_RDMA ${USE_9P_RDMA})
@@ -1021,6 +1045,9 @@ endif(USE_9P_RDMA)
 set(NTIRPC_MIN_VERSION 1.6.1)
 if (USE_SYSTEM_NTIRPC)
   find_package(NTIRPC ${NTIRPC_MIN_VERSION} REQUIRED)
+  if (USE_LTTNG)
+    set(NTIRPC_LIBRARY ${NTIRPC_LIBRARY} ${NTIRPC_LTTNG})
+  endif (USE_LTTNG)
 else (USE_SYSTEM_NTIRPC)
   # Set options for submodule
   set(USE_RPC_RDMA ${USE_NFS_RDMA} CACHE BOOL "Use RDMA")
@@ -1039,6 +1066,12 @@ endif (USE_SYSTEM_NTIRPC)
 message(${NTIRPC_INCLUDE_DIR})
 include_directories(${NTIRPC_INCLUDE_DIR})
 
+find_library(LIBURCU urcu-bp)
+if (NOT LIBURCU)
+	message(FATAL_ERROR "userspace-rcu library not found!")
+endif(NOT LIBURCU)
+check_symbol_exists(urcu_ref_get_unless_zero urcu/ref.h HAVE_URCU_REF_GET_UNLESS_ZERO)
+
 # All the plumbing in the basement
 set(SYSTEM_LIBRARIES
   ${NTIRPC_LIBRARY}
@@ -1048,6 +1081,7 @@ set(SYSTEM_LIBRARIES
   ${KRB5_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
   ${LIBRT}
+  ${LIBURCU}
 )
 
 # Config file; make sure it doesn't clobber an existing one
@@ -1117,6 +1151,8 @@ message(STATUS "USE_FSAL_CEPH_STATX = ${USE_FSAL_CEPH_STATX}")
 message(STATUS "USE_FSAL_CEPH_LL_DELEGATION = ${USE_FSAL_CEPH_LL_DELEGATION}")
 message(STATUS "USE_FSAL_CEPH_LL_SYNC_INODE = ${USE_FSAL_CEPH_LL_SYNC_INODE}")
 message(STATUS "USE_FSAL_CEPH_ABORT_CONN = ${USE_FSAL_CEPH_ABORT_CONN}")
+message(STATUS "USE_FSAL_CEPH_RECLAIM_RESET = ${USE_FSAL_CEPH_RECLAIM_RESET}")
+message(STATUS "USE_FSAL_CEPH_GET_FS_CID = ${USE_FSAL_CEPH_GET_FS_CID}")
 message(STATUS "USE_FSAL_RGW = ${USE_FSAL_RGW}")
 message(STATUS "USE_FSAL_XFS = ${USE_FSAL_XFS}")
 message(STATUS "USE_FSAL_PANFS = ${USE_FSAL_PANFS}")

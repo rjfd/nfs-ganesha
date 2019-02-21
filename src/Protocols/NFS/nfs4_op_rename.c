@@ -57,15 +57,13 @@
  * @return per RFC5661, p. 373
  */
 
-int nfs4_op_rename(struct nfs_argop4 *op, compound_data_t *data,
-		   struct nfs_resop4 *resp)
+enum nfs_req_result nfs4_op_rename(struct nfs_argop4 *op, compound_data_t *data,
+				   struct nfs_resop4 *resp)
 {
 	RENAME4args * const arg_RENAME4 = &op->nfs_argop4_u.oprename;
 	RENAME4res * const res_RENAME4 = &resp->nfs_resop4_u.oprename;
 	struct fsal_obj_handle *dst_obj = NULL;
 	struct fsal_obj_handle *src_obj = NULL;
-	nfsstat4 status = NFS4_OK;
-	fsal_status_t fsal_status = {0, 0};
 	char *oldname = NULL;
 	char *newname = NULL;
 
@@ -106,7 +104,7 @@ int nfs4_op_rename(struct nfs_argop4 *op, compound_data_t *data,
 		goto out;
 	}
 
-	if (nfs_in_grace()) {
+	if (!nfs_get_grace_status(false)) {
 		res_RENAME4->status = NFS4ERR_GRACE;
 		goto out;
 	}
@@ -119,26 +117,21 @@ int nfs4_op_rename(struct nfs_argop4 *op, compound_data_t *data,
 	res_RENAME4->RENAME4res_u.resok4.target_cinfo.before =
 	    fsal_get_changeid4(dst_obj);
 
-	status = nfs4_Errno_status(fsal_rename(src_obj, oldname, dst_obj,
-					       newname));
-
-	if (status != NFS4_OK) {
-		res_RENAME4->status = status;
-		goto out;
+	res_RENAME4->status = nfs4_Errno_status(fsal_rename(src_obj, oldname,
+							    dst_obj, newname));
+	if (res_RENAME4->status == NFS4_OK) {
+		/* If you reach this point, then everything was alright
+		 * For the change_info4, get the 'change' attributes
+		 * for both directories
+		 */
+		res_RENAME4->RENAME4res_u.resok4.source_cinfo.after =
+		    fsal_get_changeid4(src_obj);
+		res_RENAME4->RENAME4res_u.resok4.target_cinfo.after =
+		    fsal_get_changeid4(dst_obj);
+		res_RENAME4->RENAME4res_u.resok4.target_cinfo.atomic = FALSE;
+		res_RENAME4->RENAME4res_u.resok4.source_cinfo.atomic = FALSE;
 	}
-
-	/* If you reach this point, then everything was alright
-	 * For the change_info4, get the 'change' attributes
-	 * for both directories
-	 */
-	res_RENAME4->RENAME4res_u.resok4.source_cinfo.after =
-	    fsal_get_changeid4(src_obj);
-	res_RENAME4->RENAME4res_u.resok4.target_cinfo.after =
-	    fsal_get_changeid4(dst_obj);
-	res_RENAME4->RENAME4res_u.resok4.target_cinfo.atomic = FALSE;
-	res_RENAME4->RENAME4res_u.resok4.source_cinfo.atomic = FALSE;
-	res_RENAME4->status = nfs4_Errno_status(fsal_status);
-
+	nfs_put_grace_status();
  out:
 	if (oldname)
 		gsh_free(oldname);
@@ -146,7 +139,7 @@ int nfs4_op_rename(struct nfs_argop4 *op, compound_data_t *data,
 	if (newname)
 		gsh_free(newname);
 
-	return res_RENAME4->status;
+	return nfsstat4_to_nfs_req_result(res_RENAME4->status);
 }
 
 /**

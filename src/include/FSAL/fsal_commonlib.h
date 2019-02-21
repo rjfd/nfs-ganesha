@@ -117,6 +117,8 @@ int resolve_posix_filesystem(const char *path,
 
 void release_posix_file_systems(void);
 
+void release_posix_file_system(struct fsal_filesystem *fs);
+
 int re_index_fs_fsid(struct fsal_filesystem *fs,
 		     enum fsid_type fsid_type,
 		     struct fsal_fsid__ *fsid);
@@ -263,4 +265,11 @@ bool check_verifier_attrlist(struct attrlist *attrs, fsal_verifier_t verifier);
 
 bool fsal_common_is_referral(struct fsal_obj_handle *obj_hdl,
 			     struct attrlist *attrs, bool cache_attrs);
+
+fsal_status_t update_export(struct fsal_module *fsal_hdl,
+			    void *parse_node,
+			    struct config_error_type *err_type,
+			    struct fsal_export *original,
+			    struct fsal_module *updated_super);
+
 #endif				/* FSAL_COMMONLIB_H */

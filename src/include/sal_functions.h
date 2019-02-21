@@ -905,6 +905,14 @@ state_status_t delegrecall_impl(struct fsal_obj_handle *obj);
 nfsstat4 deleg_revoke(struct fsal_obj_handle *obj, struct state_t *deleg_state);
 void state_deleg_revoke(struct fsal_obj_handle *obj, state_t *state);
 bool state_deleg_conflict(struct fsal_obj_handle *obj, bool write);
+bool state_deleg_conflict_impl(struct fsal_obj_handle *obj, bool write);
+bool is_write_delegated(struct fsal_obj_handle *obj,
+			nfs_client_id_t **client);
+void reset_cbgetattr_stats(struct fsal_obj_handle *obj);
+nfsstat4 handle_deleg_getattr(struct fsal_obj_handle *obj,
+			      nfs_client_id_t *client);
+int cbgetattr_impl(struct fsal_obj_handle *obj, nfs_client_id_t *client,
+		   struct gsh_export *ctx_exp);
 
 /******************************************************************************
  *
@@ -986,8 +994,11 @@ extern int32_t reclaim_completes; /* atomic */
 void nfs_start_grace(nfs_grace_start_t *gsp);
 void nfs_end_grace(void);
 bool nfs_in_grace(void);
+bool nfs_get_grace_status(bool want_grace);
+void nfs_put_grace_status(void);
 void nfs_maybe_start_grace(void);
 bool nfs_grace_is_member(void);
+int nfs_recovery_get_nodeid(char **pnodeid);
 void nfs_try_lift_grace(void);
 void nfs_wait_for_grace_enforcement(void);
 void nfs_notify_grace_waiters(void);
@@ -1046,6 +1057,7 @@ struct nfs4_recovery_backend {
 	void (*set_enforcing)(void);
 	bool (*grace_enforcing)(void);
 	bool (*is_member)(void);
+	int (*get_nodeid)(char **pnodeid);
 };
 
 void fs_backend_init(struct nfs4_recovery_backend **);

@@ -206,9 +206,13 @@ bool fs_specific_has(const char *fs_specific, const char *key, char *val,
 
 void setglustercreds(struct glusterfs_export *glfs_export, uid_t *uid,
 		     gid_t *gid, unsigned int ngrps, gid_t *groups,
+		     char *client_addr, unsigned int client_addr_len,
 		     char *file, int line, char *function)
 {
 	int rc = 0;
+#ifdef USE_GLUSTER_DELEGATION
+	char lease_id[GLAPI_LEASE_ID_SIZE];
+#endif
 
 	if (uid) {
 		if (*uid != glfs_export->saveduid)
@@ -233,12 +237,21 @@ void setglustercreds(struct glusterfs_export *glfs_export, uid_t *uid,
 	else
 		rc = glfs_setfsgroups(0, NULL);
 
+#ifdef USE_GLUSTER_DELEGATION
+	if ((client_addr_len <= GLAPI_LEASE_ID_SIZE) && client_addr) {
+		memset(lease_id, 0, GLFS_LEASE_ID_SIZE);
+		memcpy(lease_id, client_addr, client_addr_len);
+		rc = glfs_setfsleaseid(lease_id);
+	} else
+		rc = glfs_setfsleaseid(NULL);
+#endif
  out:
 	if (rc != 0) {
 		DisplayLogComponentLevel(COMPONENT_FSAL, file, line, function,
 			 NIV_FATAL,
 			"Could not set Gluster credentials - uid(%d), gid(%d)",
-			*uid, *gid);
+			uid ? *uid : glfs_export->saveduid,
+			gid ? *gid : glfs_export->savedgid);
 	}
 }
 
@@ -383,31 +396,24 @@ fsal_status_t glusterfs_process_acl(struct glfs *fs,
 				    struct attrlist *attrs,
 				    glusterfs_fsal_xstat_t *buffxstat)
 {
-	if (attrs->acl) {
-		LogDebug(COMPONENT_FSAL, "setattr acl = %p",
-			 attrs->acl);
+	LogDebug(COMPONENT_FSAL, "setattr acl = %p", attrs->acl);
 
-		/* Convert FSAL ACL to POSIX ACL */
-		buffxstat->e_acl = fsal_acl_2_posix_acl(attrs->acl,
-						ACL_TYPE_ACCESS);
-		if (!buffxstat->e_acl) {
-			LogMajor(COMPONENT_FSAL,
-				 "failed to set access type posix acl");
-			return fsalstat(ERR_FSAL_FAULT, 0);
-		}
-		/* For directories consider inherited acl too */
-		if (buffxstat->is_dir) {
-			buffxstat->i_acl = fsal_acl_2_posix_acl(attrs->acl,
-							ACL_TYPE_DEFAULT);
-			if (!buffxstat->i_acl)
-				LogDebug(COMPONENT_FSAL,
-				"inherited acl is not defined for directory");
-		}
-
-	} else {
-		LogCrit(COMPONENT_FSAL, "setattr acl is NULL");
+	/* Convert FSAL ACL to POSIX ACL */
+	buffxstat->e_acl = fsal_acl_2_posix_acl(attrs->acl, ACL_TYPE_ACCESS);
+	if (!buffxstat->e_acl) {
+		LogMajor(COMPONENT_FSAL,
+			 "failed to set access type posix acl");
 		return fsalstat(ERR_FSAL_FAULT, 0);
 	}
+	/* For directories consider inherited acl too */
+	if (buffxstat->is_dir) {
+		buffxstat->i_acl = fsal_acl_2_posix_acl(attrs->acl,
+							ACL_TYPE_DEFAULT);
+		if (!buffxstat->i_acl)
+			LogDebug(COMPONENT_FSAL,
+				 "inherited acl is not defined for directory");
+	}
+
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
