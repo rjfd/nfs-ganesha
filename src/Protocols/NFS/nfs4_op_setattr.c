@@ -56,8 +56,9 @@
  * @return per RFC5661, p. 373-4
  */
 
-int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
-		    struct nfs_resop4 *resp)
+enum nfs_req_result nfs4_op_setattr(struct nfs_argop4 *op,
+				    compound_data_t *data,
+				    struct nfs_resop4 *resp)
 {
 	SETATTR4args * const arg_SETATTR4 = &op->nfs_argop4_u.opsetattr;
 	SETATTR4res * const res_SETATTR4 = &resp->nfs_resop4_u.opsetattr;
@@ -66,7 +67,6 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 	const char *tag = "SETATTR";
 	state_t *state_found = NULL;
 	state_t *state_open = NULL;
-	struct fsal_obj_handle *obj = NULL;
 	const time_t S_NSECS = 1000000000UL;
 
 	resp->resop = NFS4_OP_SETATTR;
@@ -76,28 +76,28 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 	res_SETATTR4->status = nfs4_sanity_check_FH(data, NO_FILE_TYPE, false);
 
 	if (res_SETATTR4->status != NFS4_OK)
-		return res_SETATTR4->status;
+		return NFS_REQ_ERROR;
 
 	/* Don't allow attribute change while we are in grace period.
 	 * Required for delegation reclaims and may be needed for other
 	 * reclaimable states as well.
 	 */
-	if (nfs_in_grace()) {
+	if (!nfs_get_grace_status(false)) {
 		res_SETATTR4->status = NFS4ERR_GRACE;
-		return res_SETATTR4->status;
+		return NFS_REQ_ERROR;
 	}
 
 	/* Get only attributes that are allowed to be read */
 	if (!nfs4_Fattr_Check_Access
 	    (&arg_SETATTR4->obj_attributes, FATTR4_ATTR_WRITE)) {
 		res_SETATTR4->status = NFS4ERR_INVAL;
-		return res_SETATTR4->status;
+		goto done;
 	}
 
 	/* Ask only for supported attributes */
 	if (!nfs4_Fattr_Supported(&arg_SETATTR4->obj_attributes)) {
 		res_SETATTR4->status = NFS4ERR_ATTRNOTSUPP;
-		return res_SETATTR4->status;
+		goto done;
 	}
 
 	/* Convert the fattr4 in the request to a fsal sattr structure */
@@ -107,7 +107,7 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 					data);
 
 	if (res_SETATTR4->status != NFS4_OK)
-		return res_SETATTR4->status;
+		goto done;
 
 	/* Trunc may change Xtime so we have to start with trunc and
 	 * finish by the mtime and atime
@@ -117,16 +117,14 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 		/* Setting the size of a directory is prohibited */
 		if (data->current_filetype == DIRECTORY) {
 			res_SETATTR4->status = NFS4ERR_ISDIR;
-			return res_SETATTR4->status;
+			goto done;
 		}
 
 		/* Object should be a file */
 		if (data->current_obj->type != REGULAR_FILE) {
 			res_SETATTR4->status = NFS4ERR_INVAL;
-			return res_SETATTR4->status;
+			goto done;
 		}
-
-		obj = data->current_obj;
 
 		/* Check stateid correctness and get pointer to state */
 		res_SETATTR4->status =
@@ -140,7 +138,7 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 				       tag);
 
 		if (res_SETATTR4->status != NFS4_OK)
-			return res_SETATTR4->status;
+			goto done;
 
 		/* NB: After this point, if state_found == NULL, then
 		 * the stateid is all-0 or all-1
@@ -167,7 +165,7 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 
 			default:
 				res_SETATTR4->status = NFS4ERR_BAD_STATEID;
-				return res_SETATTR4->status;
+				goto done;
 			}
 
 			/* This is a size operation, this means that
@@ -178,19 +176,13 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 			     OPEN4_SHARE_ACCESS_WRITE) == 0) {
 				/* Bad open mode, return NFS4ERR_OPENMODE */
 				res_SETATTR4->status = NFS4ERR_OPENMODE;
-				return res_SETATTR4->status;
+				goto done;
 			}
 		} else {
 			/* Special stateid, no open state, check to
 			 * see if any share conflicts
 			 */
 			state_open = NULL;
-
-			/* Check for delegation conflict. */
-			if (state_deleg_conflict(obj, true)) {
-				res_SETATTR4->status = NFS4ERR_DELAY;
-				goto done;
-			}
 		}
 	}
 
@@ -237,6 +229,7 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 	res_SETATTR4->status = NFS4_OK;
 
  done:
+	nfs_put_grace_status();
 
 	if (state_found != NULL)
 		dec_state_t_ref(state_found);
@@ -244,7 +237,7 @@ int nfs4_op_setattr(struct nfs_argop4 *op, compound_data_t *data,
 	if (state_open != NULL)
 		dec_state_t_ref(state_open);
 
-	return res_SETATTR4->status;
+	return nfsstat4_to_nfs_req_result(res_SETATTR4->status);
 }				/* nfs4_op_setattr */
 
 /**

@@ -43,6 +43,7 @@
 #include "nfs_proto_tools.h"
 #include "nfs_file_handle.h"
 #include "nfs_convert.h"
+#include "sal_functions.h"
 
 /**
  * @brief Gets attributes for an entry in the FSAL.
@@ -57,8 +58,9 @@
  * @return per RFC5661, p. 365
  *
  */
-int nfs4_op_getattr(struct nfs_argop4 *op, compound_data_t *data,
-		    struct nfs_resop4 *resp)
+enum nfs_req_result nfs4_op_getattr(struct nfs_argop4 *op,
+				    compound_data_t *data,
+				    struct nfs_resop4 *resp)
 {
 	GETATTR4args * const arg_GETATTR4 = &op->nfs_argop4_u.opgetattr;
 	GETATTR4res * const res_GETATTR4 = &resp->nfs_resop4_u.opgetattr;
@@ -67,10 +69,12 @@ int nfs4_op_getattr(struct nfs_argop4 *op, compound_data_t *data,
 	bool current_obj_is_referral = false;
 	fattr4 *obj_attributes =
 		&res_GETATTR4->GETATTR4res_u.resok4.obj_attributes;
+	nfs_client_id_t *deleg_client = NULL;
+	struct fsal_obj_handle *obj = data->current_obj;
+	cbgetattr_t *cbgetattr = NULL;
 
 	/* This is a NFS4_OP_GETTAR */
 	resp->resop = NFS4_OP_GETATTR;
-	res_GETATTR4->status = NFS4_OK;
 
 	/* Do basic checks on a filehandle */
 	res_GETATTR4->status = nfs4_sanity_check_FH(data, NO_FILE_TYPE, false);
@@ -105,13 +109,44 @@ int nfs4_op_getattr(struct nfs_argop4 *op, compound_data_t *data,
 
 	nfs4_bitmap4_Remove_Unsupported(&arg_GETATTR4->attr_request);
 
+	/* As per rfc 7530, section:10.4.3
+	 * The server needs to employ special handling for a GETATTR where the
+	 * target is a file that has an OPEN_DELEGATE_WRITE delegation in
+	 * effect.
+	 *
+	 * The server may use CB_GETATTR to fetch the right attributes from the
+	 * client holding the delegation or may simply recall the delegation.
+	 * Till then send EDELAY error.
+	 */
+
+	PTHREAD_RWLOCK_wrlock(&obj->state_hdl->state_lock);
+	if (is_write_delegated(obj, &deleg_client) &&
+	    deleg_client && (deleg_client->gsh_client != op_ctx->client)) {
+
+		res_GETATTR4->status = handle_deleg_getattr(obj, deleg_client);
+
+		if (res_GETATTR4->status != NFS4_OK) {
+			PTHREAD_RWLOCK_unlock(&obj->state_hdl->state_lock);
+			goto out;
+		} else {
+			/* CB_GETATTR response handler must have updated the
+			 * attributes in md-cache. reset cbgetattr state and
+			 * fall through. state_lock is held till we finish
+			 * sending response*/
+			cbgetattr = &obj->state_hdl->file.cbgetattr;
+			cbgetattr->state = CB_GETATTR_NONE;
+		}
+	}
+	/* release state_lock */
+	PTHREAD_RWLOCK_unlock(&obj->state_hdl->state_lock);
+
 	res_GETATTR4->status = file_To_Fattr(
 			data, mask, &attrs,
 			obj_attributes,
 			&arg_GETATTR4->attr_request);
 
-	current_obj_is_referral = data->current_obj->obj_ops->is_referral(
-					data->current_obj, &attrs, false);
+	current_obj_is_referral = obj->obj_ops->is_referral(
+					obj, &attrs, false);
 
 	/*
 	 * If it is a referral point, return the FATTR4_RDATTR_ERROR if
@@ -166,6 +201,9 @@ int nfs4_op_getattr(struct nfs_argop4 *op, compound_data_t *data,
 
 out:
 
+	if (deleg_client)
+		dec_client_id_ref(deleg_client);
+
 	if (res_GETATTR4->status != NFS4_OK) {
 		/* The attributes that may have been allocated will not be
 		 * consumed. Since the response array was allocated with
@@ -177,7 +215,7 @@ out:
 		data->op_resp_size = sizeof(nfsstat4);
 	}
 
-	return res_GETATTR4->status;
+	return nfsstat4_to_nfs_req_result(res_GETATTR4->status);
 }				/* nfs4_op_getattr */
 
 /**

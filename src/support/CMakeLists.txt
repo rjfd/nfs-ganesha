@@ -10,6 +10,7 @@ endif(USE_DBUS)
 set(string_utils_STAT_SRCS
    strlcpy.c
    strnlen.c
+   refstr.c
 )
 
 add_library(string_utils STATIC ${string_utils_STAT_SRCS})
@@ -43,6 +44,7 @@ add_sanitizers(netgroup_cache)
 
 if (USE_RADOS_RECOV)
    add_library(rados_grace STATIC rados_grace.c)
+   include_directories(${RADOS_INCLUDE_DIR})
 endif(USE_RADOS_RECOV)
 
 ########### next target ###############

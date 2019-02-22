@@ -211,7 +211,7 @@ open_by_handle(struct fsal_obj_handle *obj_hdl, struct state_t *state,
 						  EEXIST);
 		}
 	} else if (attrs_out && attrs_out->request_mask & ATTR_RDATTR_ERR) {
-		attrs_out->valid_mask &= ATTR_RDATTR_ERR;
+		attrs_out->valid_mask = ATTR_RDATTR_ERR;
 	}
 
 	if (state == NULL) {
@@ -731,25 +731,6 @@ find_fd(int *fd, struct fsal_obj_handle *obj_hdl, bool bypass,
 	return status;
 }
 
-static fsal_status_t
-gpfs_write_plus_fd(int my_fd, uint64_t offset,
-		   size_t buffer_size, void *buffer, size_t *write_amount,
-		   bool *fsal_stable, struct io_info *info, int expfd)
-{
-	switch (info->io_content.what) {
-	case NFS4_CONTENT_DATA:
-		return GPFSFSAL_write(my_fd, offset, buffer_size, buffer,
-				     write_amount, fsal_stable, op_ctx,
-				     expfd);
-	case NFS4_CONTENT_DEALLOCATE:
-		return GPFSFSAL_alloc(my_fd, offset, buffer_size, false);
-	case NFS4_CONTENT_ALLOCATE:
-		return GPFSFSAL_alloc(my_fd, offset, buffer_size, true);
-	default:
-		return fsalstat(ERR_FSAL_UNION_NOTSUPP, 0);
-	}
-}
-
 /**
  * @brief Read data from a file
  *
@@ -923,20 +904,12 @@ gpfs_write2(struct fsal_obj_handle *obj_hdl,
 		return;
 	}
 
-	if (write_arg->info)
-		status = gpfs_write_plus_fd(my_fd, write_arg->offset,
-					    write_arg->iov[0].iov_len,
-					    write_arg->iov[0].iov_base,
-					    &write_arg->io_amount,
-					    &write_arg->fsal_stable,
-					    write_arg->info, export_fd);
-	else
-		status = GPFSFSAL_write(my_fd, write_arg->offset,
-					write_arg->iov[0].iov_len,
-					write_arg->iov[0].iov_base,
-					&write_arg->io_amount,
-					&write_arg->fsal_stable,
-					op_ctx, export_fd);
+	status = GPFSFSAL_write(my_fd, write_arg->offset,
+				write_arg->iov[0].iov_len,
+				write_arg->iov[0].iov_base,
+				&write_arg->io_amount,
+				&write_arg->fsal_stable,
+				op_ctx, export_fd);
 
 	if (gpfs_fd)
 		PTHREAD_RWLOCK_unlock(&gpfs_fd->fdlock);
@@ -1461,9 +1434,15 @@ gpfs_close2(struct fsal_obj_handle *obj_hdl, struct state_t *state)
 			     "state %p fd %d", state, my_fd->fd);
 		state_owner = state->state_owner;
 
+		/* Acquire state's fdlock to make sure no other thread
+		 * is operating on the fd while we close it.
+		 */
+		PTHREAD_RWLOCK_wrlock(&my_fd->fdlock);
 		status = fsal_internal_close(my_fd->fd, state_owner, 0);
+
 		my_fd->fd = -1;
 		my_fd->openflags = FSAL_O_CLOSED;
+		PTHREAD_RWLOCK_unlock(&my_fd->fdlock);
 	}
 	if (FSAL_IS_ERROR(status)) {
 		struct gpfs_file_handle *gfh = container_of(obj_hdl,

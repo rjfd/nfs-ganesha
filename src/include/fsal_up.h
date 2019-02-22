@@ -49,6 +49,7 @@
 
 #include "gsh_status.h"
 #include "fsal_api.h"
+#include "sal_data.h"
 
 enum {
 	/* empty flags */
@@ -112,13 +113,15 @@ static const uint32_t FSAL_UP_INVALIDATE_DIR_POPULATED = 0x08;
 static const uint32_t FSAL_UP_INVALIDATE_DIR_CHUNKS = 0x10;
 static const uint32_t FSAL_UP_INVALIDATE_CLOSE = 0x100;
 static const uint32_t FSAL_UP_INVALIDATE_FS_LOCATIONS = 0x200;
+static const uint32_t FSAL_UP_INVALIDATE_SEC_LABEL = 0x400;
 #define FSAL_UP_INVALIDATE_CACHE ( \
 	FSAL_UP_INVALIDATE_ATTRS | \
 	FSAL_UP_INVALIDATE_ACL | \
 	FSAL_UP_INVALIDATE_CONTENT | \
 	FSAL_UP_INVALIDATE_DIR_POPULATED | \
 	FSAL_UP_INVALIDATE_DIR_CHUNKS | \
-	FSAL_UP_INVALIDATE_FS_LOCATIONS)
+	FSAL_UP_INVALIDATE_FS_LOCATIONS | \
+	FSAL_UP_INVALIDATE_SEC_LABEL)
 
 /**
  * @brief Possible upcall functions
@@ -321,6 +324,9 @@ fsal_status_t up_async_delegrecall(struct fridgethr *fr,
 
 /** @} */
 int async_delegrecall(struct fridgethr *fr, struct fsal_obj_handle *obj);
+
+int async_cbgetattr(struct fridgethr *fr, struct fsal_obj_handle *obj,
+		    nfs_client_id_t *client);
 
 void up_ready_init(struct fsal_up_vector *up_ops);
 void up_ready_set(struct fsal_up_vector *up_ops);

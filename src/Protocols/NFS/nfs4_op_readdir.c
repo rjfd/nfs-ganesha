@@ -61,6 +61,10 @@ struct nfs4_readdir_cb_data {
 
 static void restore_data(struct nfs4_readdir_cb_data *tracker)
 {
+	if (tracker->saved_gsh_export == NULL) {
+		LogCrit(COMPONENT_NFS_READDIR, "Nothing to restore!");
+	}
+
 	/* Restore export stuff */
 	if (op_ctx->ctx_export)
 		put_gsh_export(op_ctx->ctx_export);
@@ -489,8 +493,9 @@ static void free_entries(entry4 *entries)
  * @return per RFC5661, pp. 371-2
  *
  */
-int nfs4_op_readdir(struct nfs_argop4 *op, compound_data_t *data,
-		    struct nfs_resop4 *resp)
+enum nfs_req_result nfs4_op_readdir(struct nfs_argop4 *op,
+				    compound_data_t *data,
+				    struct nfs_resop4 *resp)
 {
 	READDIR4args * const arg_READDIR4 = &op->nfs_argop4_u.opreaddir;
 	READDIR4res * const res_READDIR4 = &resp->nfs_resop4_u.opreaddir;
@@ -651,6 +656,11 @@ int nfs4_op_readdir(struct nfs_argop4 *op, compound_data_t *data,
 	if (attribute_is_set(tracker.req_attr, FATTR4_ACL))
 		attrmask |= ATTR_ACL;
 
+	/* If seclabel requested, then fetch it too */
+	if (attribute_is_set(tracker.req_attr, FATTR4_SEC_LABEL) &&
+	    op_ctx_export_has_option(EXPORT_OPTION_SECLABEL_SET))
+		attrmask |= ATTR4_SEC_LABEL;
+
 	/* Perform the readdir operation */
 	fsal_status = fsal_readdir(dir_obj,
 				   cookie,
@@ -727,7 +737,7 @@ int nfs4_op_readdir(struct nfs_argop4 *op, compound_data_t *data,
 		 "Returning %s",
 		 nfsstat4_to_str(res_READDIR4->status));
 
-	return res_READDIR4->status;
+	return nfsstat4_to_nfs_req_result(res_READDIR4->status);
 }				/* nfs4_op_readdir */
 
 /**

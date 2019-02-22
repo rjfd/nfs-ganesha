@@ -164,6 +164,8 @@ char *err_type_str(struct config_error_type *err_type)
 		fputs("internal error, ", fp);
 	if (err_type->bogus)
 		fputs("unknown param, ", fp);
+	if (err_type->deprecated)
+		fputs("deprecated param, ", fp);
 	if (ferror(fp))
 		LogCrit(COMPONENT_CONFIG,
 			"file error while constructing err_type string");
@@ -764,6 +766,8 @@ static const char *config_type_str(enum config_type type)
 		return "CONFIG_BLOCK";
 	case CONFIG_PROC:
 		return "CONFIG_PROC";
+	case CONFIG_DEPRECATED:
+		return "CONFIG_DEPRECATED";
 	}
 	return "unknown";
 }
@@ -894,6 +898,8 @@ static bool do_block_init(struct config_node *blk_node,
 			break;
 		case CONFIG_PROC:
 			(void) item->u.proc.init(NULL, param_addr);
+			break;
+		case CONFIG_DEPRECATED:
 			break;
 		default:
 			config_proc_error(blk_node, err_type,
@@ -1229,6 +1235,19 @@ static int do_block_load(struct config_node *blk,
 			case CONFIG_PROC:
 				do_proc(node, item, param_addr,	err_type);
 				break;
+			case CONFIG_DEPRECATED:
+				config_proc_error(node, err_type,
+					"Deprectated parameter (%s)%s%s",
+					item->name,
+					item->u.deprecated.message
+						? " - "
+						: "",
+					item->u.deprecated.message
+						? item->u.deprecated.message
+						: "");
+				err_type->deprecated = true;
+				errors++;
+				break;
 			default:
 				config_proc_error(term_node, err_type,
 						  "Cannot set value for type(%d) yet",
@@ -1378,6 +1397,8 @@ static bool proc_block(struct config_node *node,
 		 * disposed of. Need to clear the flag so the next config
 		 * block processed gets a clear slate.
 		 */
+		LogFullDebug(COMPONENT_CONFIG,
+			     "Releasing block %p/%p", link_mem, param_struct);
 		(void)item->u.blk.init(link_mem, param_struct);
 		err_type->dispose = false;
 	}
@@ -1385,6 +1406,8 @@ static bool proc_block(struct config_node *node,
 	return true;
 
 err_out:
+	LogFullDebug(COMPONENT_CONFIG,
+		     "Releasing block %p/%p", link_mem, param_struct);
 	(void)item->u.blk.init(link_mem, param_struct);
 	err_type->dispose = false;
 	return false;
@@ -1413,6 +1436,18 @@ config_file_t get_parse_root(void *node)
 	assert(parent->type == TYPE_ROOT);
 	root = container_of(parent, struct config_root, root);
 	return (config_file_t)root;
+}
+
+uint64_t get_config_generation(struct config_root *root)
+{
+	return root->generation;
+}
+
+uint64_t get_parse_root_generation(void *node)
+{
+	struct config_root *root = (struct config_root *)get_parse_root(node);
+
+	return get_config_generation(root);
 }
 
 /**

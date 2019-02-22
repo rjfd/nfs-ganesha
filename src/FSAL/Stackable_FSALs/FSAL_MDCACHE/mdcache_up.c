@@ -37,6 +37,7 @@
 #include "nfs4_acls.h"
 #include "mdcache_hash.h"
 #include "mdcache_int.h"
+#include "nfs_core.h"
 #include "nfs4_fs_locations.h"
 
 static fsal_status_t
@@ -101,6 +102,7 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 	bool mutatis_mutandis = false;
 	struct req_op_context *save_ctx, req_ctx = {0};
 	mdcache_key_t key;
+	attrmask_t mask_set = 0;
 
 	/* These cannot be updated, changing any of them is
 	   tantamount to destroying and recreating the file. */
@@ -178,10 +180,12 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 			if (attr->filesize > entry->attrs.filesize) {
 				entry->attrs.filesize = attr->filesize;
 				mutatis_mutandis = true;
+				mask_set |= ATTR_SIZE;
 			}
 		} else {
 			entry->attrs.filesize = attr->filesize;
 			mutatis_mutandis = true;
+			mask_set |= ATTR_SIZE;
 		}
 	}
 
@@ -190,10 +194,12 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 			if (attr->spaceused > entry->attrs.spaceused) {
 				entry->attrs.spaceused = attr->spaceused;
 				mutatis_mutandis = true;
+				mask_set |= ATTR_SPACEUSED;
 			}
 		} else {
 			entry->attrs.spaceused = attr->spaceused;
 			mutatis_mutandis = true;
+			mask_set |= ATTR_SPACEUSED;
 		}
 	}
 
@@ -210,26 +216,31 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 
 		entry->attrs.acl = attr->acl;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_ACL;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_MODE)) {
 		entry->attrs.mode = attr->mode;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_MODE;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_NUMLINKS)) {
 		entry->attrs.numlinks = attr->numlinks;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_NUMLINKS;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_OWNER)) {
 		entry->attrs.owner = attr->owner;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_OWNER;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_GROUP)) {
 		entry->attrs.group = attr->group;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_GROUP;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_ATIME)
@@ -238,6 +249,7 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 		(gsh_time_cmp(&attr->atime, &entry->attrs.atime) == 1))) {
 		entry->attrs.atime = attr->atime;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_ATIME;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_CREATION)
@@ -246,6 +258,7 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 		(gsh_time_cmp(&attr->creation, &entry->attrs.creation) == 1))) {
 		entry->attrs.creation = attr->creation;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_CREATION;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_CTIME)
@@ -254,6 +267,7 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 		(gsh_time_cmp(&attr->ctime, &entry->attrs.ctime) == 1))) {
 		entry->attrs.ctime = attr->ctime;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_CTIME;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_MTIME)
@@ -262,6 +276,7 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 		(gsh_time_cmp(&attr->mtime, &entry->attrs.mtime) == 1))) {
 		entry->attrs.mtime = attr->mtime;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_MTIME;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_CHGTIME)
@@ -270,11 +285,13 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 		(gsh_time_cmp(&attr->chgtime, &entry->attrs.chgtime) == 1))) {
 		entry->attrs.chgtime = attr->chgtime;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_CHGTIME;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR_CHANGE)) {
 		entry->attrs.change = attr->change;
 		mutatis_mutandis = true;
+		mask_set |= ATTR_CHANGE;
 	}
 
 	if (FSAL_TEST_MASK(attr->valid_mask, ATTR4_FS_LOCATIONS)) {
@@ -282,10 +299,21 @@ mdc_up_update(const struct fsal_up_vector *vec, struct gsh_buffdesc *handle,
 
 		entry->attrs.fs_locations = attr->fs_locations;
 		mutatis_mutandis = true;
+		mask_set |= ATTR4_FS_LOCATIONS;
+	}
+
+	if (FSAL_TEST_MASK(attr->valid_mask, ATTR4_SEC_LABEL)) {
+		gsh_free(entry->attrs.sec_label.slai_data.slai_data_val);
+		entry->attrs.sec_label = attr->sec_label;
+		attr->sec_label.slai_data.slai_data_len = 0;
+		attr->sec_label.slai_data.slai_data_val = NULL;
+		mutatis_mutandis = true;
+		mask_set |= ATTR4_SEC_LABEL;
 	}
 
 	if (mutatis_mutandis) {
 		mdc_fixup_md(entry, attr);
+		entry->attrs.valid_mask |= mask_set;
 		/* If directory can not trust content anymore. */
 		if (entry->obj_handle.type == DIRECTORY) {
 			LogFullDebug(COMPONENT_CACHE_INODE,
@@ -352,17 +380,16 @@ state_status_t mdc_up_lock_grant(const struct fsal_up_vector *vec,
 {
 	struct mdcache_fsal_export *myself = mdc_export(vec->up_fsal_export);
 	state_status_t rc;
-	struct req_op_context *save_ctx, req_ctx = {0};
+	struct root_op_context root_ctx;
 
-	req_ctx.ctx_export = vec->up_gsh_export;
-	req_ctx.fsal_export = vec->up_fsal_export;
-	save_ctx = op_ctx;
-	op_ctx = &req_ctx;
+	/* Initialize op context */
+	init_root_op_context(&root_ctx, vec->up_gsh_export,
+		vec->up_fsal_export, 0, 0, UNKNOWN_REQUEST);
 
 	rc = myself->super_up_ops.lock_grant(vec, file, owner,
 					     lock_param);
 
-	op_ctx = save_ctx;
+	release_root_op_context();
 
 	return rc;
 }
@@ -372,7 +399,7 @@ state_status_t mdc_up_lock_grant(const struct fsal_up_vector *vec,
  * Pass up to upper layer
  *
  * @param[in] vec	   Up ops vector
- * @param[in] file         The file in question
+ * @param[in] file	 The file in question
  * @param[in] owner        The lock owner
  * @param[in] lock_param   A description of the lock
  *
@@ -384,17 +411,16 @@ state_status_t mdc_up_lock_avail(const struct fsal_up_vector *vec,
 {
 	struct mdcache_fsal_export *myself = mdc_export(vec->up_fsal_export);
 	state_status_t rc;
-	struct req_op_context *save_ctx, req_ctx = {0};
+	struct root_op_context root_ctx;
 
-	req_ctx.ctx_export = vec->up_gsh_export;
-	req_ctx.fsal_export = vec->up_fsal_export;
-	save_ctx = op_ctx;
-	op_ctx = &req_ctx;
+	/* Initialize op context */
+	init_root_op_context(&root_ctx, vec->up_gsh_export,
+		vec->up_fsal_export, 0, 0, UNKNOWN_REQUEST);
 
 	rc = myself->super_up_ops.lock_avail(vec, file, owner,
 					     lock_param);
 
-	op_ctx = save_ctx;
+	release_root_op_context();
 
 	return rc;
 }

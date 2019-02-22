@@ -886,7 +886,7 @@ fsal_status_t rgw_fsal_open2(struct fsal_obj_handle *obj_hdl,
 
 		} else if (attrs_out && attrs_out->request_mask &
 			   ATTR_RDATTR_ERR) {
-			attrs_out->valid_mask &= ATTR_RDATTR_ERR;
+			attrs_out->valid_mask = ATTR_RDATTR_ERR;
 		}
 
 		if (!state) {
@@ -1366,13 +1366,6 @@ void rgw_fsal_write2(struct fsal_obj_handle *obj_hdl,
 	LogFullDebug(COMPONENT_FSAL,
 		"%s enter obj_hdl %p state %p", __func__, obj_hdl,
 		write_arg->state);
-
-	if (write_arg->info != NULL) {
-		/* Currently we don't support WRITE_PLUS */
-		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), write_arg,
-			caller_arg);
-		return;
-	}
 
 	/* XXX note no call to fsal_find_fd (or wrapper) */
 

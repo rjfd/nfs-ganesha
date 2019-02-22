@@ -494,7 +494,7 @@ static fsal_status_t vfs_open2_by_handle(struct fsal_obj_handle *obj_hdl,
 
 		fsal_release_attrs(&attrs);
 	} else if (attrs_out && attrs_out->request_mask & ATTR_RDATTR_ERR) {
-		attrs_out->valid_mask &= ATTR_RDATTR_ERR;
+		attrs_out->valid_mask = ATTR_RDATTR_ERR;
 	}
 
 	if (state == NULL) {
@@ -1308,13 +1308,6 @@ void vfs_write2(struct fsal_obj_handle *obj_hdl,
 	fsal_openflags_t openflags = FSAL_O_WRITE;
 	struct vfs_fd *vfs_fd = NULL;
 
-	if (write_arg->info != NULL) {
-		/* Currently we don't support WRITE_PLUS */
-		done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), write_arg,
-			caller_arg);
-		return;
-	}
-
 	if (obj_hdl->fsal != obj_hdl->fs->fsal) {
 		LogDebug(COMPONENT_FSAL,
 			 "FSAL %s operation for handle belonging to FSAL %s, return EXDEV",
@@ -1389,6 +1382,168 @@ void vfs_write2(struct fsal_obj_handle *obj_hdl,
 
 	done_cb(obj_hdl, status, write_arg, caller_arg);
 }
+
+/**
+ * @brief Seek to data or hole
+ *
+ * This function seek to data or hole in a file.
+ *
+ * @param[in]     obj_hdl   File on which to operate
+ * @param[in]     state     state_t to use for this operation
+ * @param[in,out] info      Information about the data
+ *
+ * @return FSAL status.
+ */
+
+#ifdef __USE_GNU
+fsal_status_t vfs_seek2(struct fsal_obj_handle *obj_hdl,
+			struct state_t *state,
+			struct io_info *info)
+{
+	struct vfs_fsal_obj_handle *myself;
+	off_t ret = 0, offset = info->io_content.hole.di_offset;
+	int what = 0;
+	bool has_lock = false;
+	bool closefd = false;
+	fsal_openflags_t openflags = FSAL_O_ANY;
+	fsal_status_t status = { ERR_FSAL_NO_ERROR, 0 };
+	int my_fd = -1;
+	struct attrlist attrs;
+
+	myself = container_of(obj_hdl, struct vfs_fsal_obj_handle, obj_handle);
+
+	/* Get a usable file descriptor */
+	status = find_fd(&my_fd, obj_hdl, false, state, openflags,
+		&has_lock, &closefd, false);
+
+	if (FSAL_IS_ERROR(status))
+		goto out;
+
+	fsal_prepare_attrs(&attrs,
+			   (op_ctx->fsal_export->exp_ops.fs_supported_attrs(
+							op_ctx->fsal_export)
+				& ~(ATTR_ACL | ATTR4_FS_LOCATIONS)));
+
+	status = fetch_attrs(myself, my_fd, &attrs);
+
+	fsal_release_attrs(&attrs);
+
+	if (FSAL_IS_ERROR(status)) {
+		goto out;
+	}
+
+	/* RFC7862 15.11.3,
+	 * If the sa_offset is beyond the end of the file,
+	 * then SEEK MUST return NFS4ERR_NXIO. */
+	if (offset >= attrs.filesize) {
+		status = posix2fsal_status(ENXIO);
+		goto out;
+	}
+
+	if (info->io_content.what == NFS4_CONTENT_DATA) {
+		what = SEEK_DATA;
+	} else if (info->io_content.what == NFS4_CONTENT_HOLE) {
+		what = SEEK_HOLE;
+	} else {
+		status = fsalstat(ERR_FSAL_UNION_NOTSUPP, 0);
+		goto out;
+	}
+
+	ret = lseek(my_fd, offset, what);
+
+	if (ret < 0) {
+		if (errno == ENXIO) {
+			info->io_eof = TRUE;
+		} else {
+			status = posix2fsal_status(errno);
+		}
+		goto out;
+	} else {
+		info->io_eof = (ret >= attrs.filesize);
+		info->io_content.hole.di_offset = ret;
+	}
+
+ out:
+
+	if (closefd) {
+		LogFullDebug(COMPONENT_FSAL,
+			     "Closing Opened fd %d", my_fd);
+		close(my_fd);
+	}
+
+	if (has_lock)
+		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+	return status;
+}
+#endif
+
+/**
+ * @brief Reserve/Deallocate space in a region of a file
+ *
+ * @param[in] obj_hdl File to which bytes should be allocated
+ * @param[in] state   open stateid under which to do the allocation
+ * @param[in] offset  offset at which to begin the allocation
+ * @param[in] length  length of the data to be allocated
+ * @param[in] allocate Should space be allocated or deallocated?
+ *
+ * @return FSAL status.
+ */
+
+#ifdef FALLOC_FL_PUNCH_HOLE
+fsal_status_t vfs_fallocate(struct fsal_obj_handle *obj_hdl,
+			    struct state_t *state, uint64_t offset,
+			    uint64_t length, bool allocate)
+{
+	int ret = 0;
+	bool has_lock = false;
+	bool closefd = false;
+	fsal_openflags_t openflags = FSAL_O_WRITE;
+	fsal_status_t status = { ERR_FSAL_NO_ERROR, 0 };
+	int my_fd = -1;
+
+	/* Get a usable file descriptor */
+	status = find_fd(&my_fd, obj_hdl, false, state, openflags,
+		&has_lock, &closefd, false);
+
+	if (FSAL_IS_ERROR(status))
+		goto out;
+
+	if (!vfs_set_credentials(op_ctx->creds, obj_hdl->fsal)) {
+		status = posix2fsal_status(EPERM);
+		goto out;
+	}
+
+	ret = fallocate(my_fd,
+			allocate
+				? 0
+				: FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
+			offset, length);
+
+	if (ret < 0) {
+		ret = errno;
+		LogFullDebug(COMPONENT_FSAL,
+			     "fallocate returned %s (%d)",
+			     strerror(ret), ret);
+		status = posix2fsal_status(ret);
+	}
+
+	vfs_restore_ganesha_credentials(obj_hdl->fsal);
+
+ out:
+
+	if (closefd) {
+		LogFullDebug(COMPONENT_FSAL,
+			     "Closing Opened fd %d", my_fd);
+		close(my_fd);
+	}
+
+	if (has_lock)
+		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+	return status;
+}
+#endif
 
 /**
  * @brief Commit written data
@@ -2055,6 +2210,7 @@ fsal_status_t vfs_close2(struct fsal_obj_handle *obj_hdl,
 			 struct state_t *state)
 {
 	struct vfs_fsal_obj_handle *myself = NULL;
+	fsal_status_t status = {0, 0};
 	struct vfs_fd *my_fd = &container_of(state, struct vfs_state_fd,
 					     state)->vfs_fd;
 
@@ -2077,5 +2233,12 @@ fsal_status_t vfs_close2(struct fsal_obj_handle *obj_hdl,
 		PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
 	}
 
-	return vfs_close_my_fd(my_fd);
+	/* Acquire state's fdlock to make sure no other thread
+	 * is operating on the fd while we close it.
+	 */
+	PTHREAD_RWLOCK_wrlock(&my_fd->fdlock);
+	status = vfs_close_my_fd(my_fd);
+	PTHREAD_RWLOCK_unlock(&my_fd->fdlock);
+
+	return status;
 }

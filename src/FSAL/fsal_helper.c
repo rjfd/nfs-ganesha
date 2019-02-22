@@ -49,6 +49,7 @@
 #include "sal_data.h"
 #include "sal_functions.h"
 #include "FSAL/fsal_commonlib.h"
+#include "sal_functions.h"
 
 /**
  * This is a global counter of files opened.
@@ -478,6 +479,11 @@ fsal_status_t fsal_setattr(struct fsal_obj_handle *obj, bool bypass,
 			obj->type);
 		return fsalstat(ERR_FSAL_BADTYPE, 0);
 	}
+	if ((attr->valid_mask & (ATTR_SIZE | ATTR_MODE))) {
+		if (state_deleg_conflict(obj, true)) {
+			return fsalstat(ERR_FSAL_DELAY, 0);
+		}
+	}
 
 	/* Is it allowed to change times ? */
 	if (!op_ctx->fsal_export->exp_ops.fs_supports(op_ctx->fsal_export,
@@ -631,6 +637,12 @@ fsal_status_t fsal_link(struct fsal_obj_handle *obj,
 
 		if (FSAL_IS_ERROR(status))
 			return status;
+	}
+
+	if (state_deleg_conflict(obj, true)) {
+		LogDebug(COMPONENT_FSAL, "Found an existing delegation for %s",
+			  name);
+		return fsalstat(ERR_FSAL_DELAY, 0);
 	}
 
 	/* Rather than performing a lookup first, just try to make the
@@ -1048,6 +1060,12 @@ populate_dirent(const char *name,
 
 		junction_obj->obj_ops->put_ref(junction_obj);
 		put_gsh_export(junction_export);
+
+		/* state->cb (nfs4_readdir_callback) saved op_ctx
+		 * ctx_export and fsal_export. Restore them here
+		 */
+		(void)state->cb(&state->cb_parms, NULL, NULL,
+				 0, 0, CB_PROBLEM);
 	}
 
 	if (!state->cb_parms.in_result) {
@@ -1200,6 +1218,13 @@ fsal_remove(struct fsal_obj_handle *parent, const char *name)
 		goto out;
 	}
 
+	if (state_deleg_conflict(to_remove_obj, true)) {
+		LogDebug(COMPONENT_FSAL, "Found an existing delegation for %s",
+			  name);
+		status = fsalstat(ERR_FSAL_DELAY, 0);
+		goto out;
+	}
+
 	LogFullDebug(COMPONENT_FSAL, "%s", name);
 
 	/* Make sure the to_remove_obj is closed since unlink of an
@@ -1289,6 +1314,15 @@ fsal_status_t fsal_rename(struct fsal_obj_handle *dir_src,
 	/* Don't allow rename of an object as parent of itself */
 	if (dir_dest == lookup_src) {
 		fsal_status = fsalstat(ERR_FSAL_INVAL, 0);
+		goto out;
+	}
+	/* *
+	 * added conflicts check for destination in MDCACHE layer
+	 */
+	if (state_deleg_conflict(lookup_src, true)) {
+		LogDebug(COMPONENT_FSAL, "Found an existing delegation for %s",
+			  oldname);
+		fsal_status = fsalstat(ERR_FSAL_DELAY, 0);
 		goto out;
 	}
 
@@ -1561,6 +1595,72 @@ fsal_status_t get_optional_attrs(struct fsal_obj_handle *obj_hdl,
 	}
 
 	return status;
+}
+
+/**
+ * @brief Callback to implement syncronous read and write
+ *
+ * @param[in] obj		Object being acted on
+ * @param[in] ret		Return status of call
+ * @param[in] args		Args for read call
+ * @param[in] caller_data	Data for caller
+ */
+static void sync_cb(struct fsal_obj_handle *obj, fsal_status_t ret,
+			 void *args, void *caller_data)
+{
+	struct async_process_data *data = caller_data;
+
+	/* Fixup FSAL_SHARE_DENIED status */
+	if (ret.major == ERR_FSAL_SHARE_DENIED)
+		ret = fsalstat(ERR_FSAL_LOCKED, 0);
+
+	data->ret = ret;
+
+	/* Let caller know we are done. */
+
+	PTHREAD_MUTEX_lock(data->mutex);
+
+	data->done = true;
+
+	pthread_cond_signal(data->cond);
+
+	PTHREAD_MUTEX_unlock(data->mutex);
+}
+
+void fsal_read(struct fsal_obj_handle *obj_hdl,
+	       bool bypass,
+	       struct fsal_io_arg *arg,
+	       struct async_process_data *data)
+{
+	obj_hdl->obj_ops->read2(obj_hdl, bypass, sync_cb, arg, data);
+
+	PTHREAD_MUTEX_lock(data->mutex);
+
+	while (!data->done) {
+		int rc = pthread_cond_wait(data->cond, data->mutex);
+
+		assert(rc == 0);
+	}
+
+	PTHREAD_MUTEX_unlock(data->mutex);
+}
+
+void fsal_write(struct fsal_obj_handle *obj_hdl,
+		bool bypass,
+		struct fsal_io_arg *arg,
+		struct async_process_data *data)
+{
+	obj_hdl->obj_ops->write2(obj_hdl, bypass, sync_cb, arg, data);
+
+	PTHREAD_MUTEX_lock(data->mutex);
+
+	while (!data->done) {
+		int rc = pthread_cond_wait(data->cond, data->mutex);
+
+		assert(rc == 0);
+	}
+
+	PTHREAD_MUTEX_unlock(data->mutex);
 }
 
 /** @} */

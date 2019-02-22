@@ -153,6 +153,10 @@ struct glusterfs_export {
 	bool pnfs_mds_enabled;
 };
 
+#ifdef USE_GLUSTER_DELEGATION
+#define GLAPI_LEASE_ID_SIZE GLFS_LEASE_ID_SIZE
+#endif
+
 struct glusterfs_fd {
 	/** The open and share mode etc. This MUST be first in every
 	 *  file descriptor structure.
@@ -165,6 +169,9 @@ struct glusterfs_fd {
 	/** Gluster file descriptor. */
 	struct glfs_fd *glfd;
 	struct user_cred creds; /* user creds opening fd*/
+#ifdef USE_GLUSTER_DELEGATION
+	char lease_id[GLAPI_LEASE_ID_SIZE];
+#endif
 };
 
 struct glusterfs_handle {
@@ -181,6 +188,10 @@ struct glusterfs_handle {
 	uint64_t rw_issued;
 	uint64_t rw_serial;
 	uint64_t rw_max_len;
+#ifdef USE_GLUSTER_DELEGATION
+	glfs_lease_types_t lease_type; /* Store lease_type granted to
+					 this file: NONE,RD or RW */
+#endif
 };
 
 /* Structures defined for PNFS */
@@ -209,11 +220,23 @@ struct glfs_ds_wire {
 typedef struct fsal_xstat__ {
 	int attr_valid;
 	struct stat buffstat;
-	char buffacl[GLFS_ACL_BUF_SIZE];
 	acl_t e_acl; /* stores effective acl */
 	acl_t i_acl; /* stores inherited acl */
 	bool is_dir;
 } glusterfs_fsal_xstat_t;
+
+static inline void glusterfs_fsal_clean_xstat(glusterfs_fsal_xstat_t *buffxstat)
+{
+	if (buffxstat->e_acl) {
+		acl_free(buffxstat->e_acl);
+		buffxstat->e_acl = NULL;
+	}
+
+	if (buffxstat->i_acl) {
+		acl_free(buffxstat->i_acl);
+		buffxstat->i_acl = NULL;
+	}
+}
 
 struct glusterfs_state_fd {
 	struct state_t state;
@@ -222,14 +245,18 @@ struct glusterfs_state_fd {
 
 void setglustercreds(struct glusterfs_export *glfs_export, uid_t *uid,
 		     gid_t *gid, unsigned int ngrps, gid_t *groups,
+		     char *client_addr, unsigned int client_addr_len,
 		     char *file, int line, char *function);
 
-#define SET_GLUSTER_CREDS(glfs_export, uid, gid, glen, garray) do {	\
-	int old_errno = errno;						\
-	((void) setglustercreds(glfs_export, uid, gid, glen,		\
-				garray, (char *) __FILE__,		\
-				__LINE__, (char *) __func__));		\
-	errno = old_errno;						\
+#define SET_GLUSTER_CREDS(glfs_export, uid, gid, glen, garray, client_addr, \
+			  client_addr_len)				    \
+do {									    \
+	int old_errno = errno;						    \
+	((void) setglustercreds(glfs_export, uid, gid, glen,		    \
+			       garray, client_addr, client_addr_len,	    \
+			       (char *) __FILE__,			    \
+			       __LINE__, (char *) __func__));		    \
+	errno = old_errno;						    \
 } while (0)
 
 #ifdef GLTIMING
@@ -308,8 +335,9 @@ nfsstat4 getdeviceinfo(struct fsal_module *fsal_hdl,
 /* UP thread routines */
 void *GLUSTERFSAL_UP_Thread(void *Arg);
 int initiate_up_thread(struct glusterfs_fs *gl_fs);
-int upcall_inode_invalidate(struct glusterfs_fs *gl_fs,
-			    struct glfs_object *object);
+int up_process_event_object(struct glusterfs_fs *gl_fs,
+			    struct glfs_object *object,
+			    enum glfs_upcall_reason reason);
 void gluster_process_upcall(struct glfs_upcall *cbk, void *data);
 
 fsal_status_t glusterfs_close_my_fd(struct glusterfs_fd *my_fd);

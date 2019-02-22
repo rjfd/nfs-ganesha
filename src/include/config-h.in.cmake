@@ -49,6 +49,7 @@
 #cmakedefine ENABLE_RFC_ACL 1
 #cmakedefine USE_GLUSTER_XREADDIRPLUS 1
 #cmakedefine USE_GLUSTER_UPCALL_REGISTER 1
+#cmakedefine USE_GLUSTER_DELEGATION 1
 #cmakedefine USE_FSAL_CEPH_MKNOD 1
 #cmakedefine USE_FSAL_CEPH_SETLK 1
 #cmakedefine USE_FSAL_CEPH_LL_LOOKUP_ROOT 1
@@ -57,6 +58,8 @@
 #cmakedefine USE_FSAL_CEPH_LL_SYNC_INODE 1
 #cmakedefine USE_CEPH_LL_FALLOCATE 1
 #cmakedefine USE_FSAL_CEPH_ABORT_CONN 1
+#cmakedefine USE_FSAL_CEPH_RECLAIM_RESET 1
+#cmakedefine USE_FSAL_CEPH_GET_FS_CID 1
 #cmakedefine USE_FSAL_RGW_MOUNT2 1
 #cmakedefine ENABLE_LOCKTRACE 1
 #cmakedefine SANITIZE_ADDRESS 1
@@ -65,6 +68,7 @@
 #cmakedefine RADOS_URLS 1
 #cmakedefine USE_LLAPI 1
 #cmakedefine USE_GLUSTER_STAT_FETCH_API 1
+#cmakedefine HAVE_URCU_REF_GET_UNLESS_ZERO 1
 #define NFS_GANESHA 1
 
 #define GANESHA_CONFIG_PATH "@SYSCONFDIR@/ganesha/ganesha.conf"

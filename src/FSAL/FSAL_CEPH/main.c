@@ -48,6 +48,7 @@
 #include "export_mgr.h"
 #include "statx_compat.h"
 #include "nfs_core.h"
+#include "sal_functions.h"
 
 /**
  * The name of this module.
@@ -157,8 +158,11 @@ static fsal_status_t find_cephfs_root(struct ceph_mount_info *cmount,
 static struct config_item export_params[] = {
 	CONF_ITEM_NOOP("name"),
 	CONF_ITEM_STR("user_id", 0, MAXUIDLEN, NULL, ceph_export, user_id),
+	CONF_ITEM_STR("filesystem", 0, NAME_MAX, NULL, ceph_export, fs_name),
 	CONF_ITEM_STR("secret_access_key", 0, MAXSECRETLEN, NULL, ceph_export,
 			secret_key),
+	CONF_ITEM_STR("sec_label_xattr", 0, 256, "security.selinux",
+			ceph_export, sec_label_xattr),
 	CONFIG_EOL
 };
 
@@ -208,6 +212,83 @@ static inline void enable_delegations(struct ceph_export *export)
 {
 }
 #endif /* USE_FSAL_CEPH_LL_DELEGATION */
+
+#ifdef USE_FSAL_CEPH_RECLAIM_RESET
+#define RECLAIM_UUID_PREFIX		"ganesha-"
+static int reclaim_reset(struct ceph_export *export)
+{
+	int		ceph_status;
+	char		*nodeid, *uuid;
+	size_t		len;
+
+	/*
+	 * Set long timeout for the session to ensure that MDS doesn't lose
+	 * state before server can come back and do recovery.
+	 */
+	ceph_set_session_timeout(export->cmount, 300);
+
+	/*
+	 * For the uuid here, we just use whatever ganesha- + whatever
+	 * nodeid the recovery backend reports.
+	 */
+	ceph_status = nfs_recovery_get_nodeid(&nodeid);
+	if (ceph_status != 0) {
+		LogEvent(COMPONENT_FSAL, "couldn't get nodeid: %d", errno);
+		return ceph_status;
+	}
+
+	len = strlen(RECLAIM_UUID_PREFIX) + strlen(nodeid) + 1;
+	uuid = gsh_malloc(len);
+	snprintf(uuid, len, RECLAIM_UUID_PREFIX "%s", nodeid);
+
+	/* If this fails, log a message but soldier on */
+	ceph_status = ceph_start_reclaim(export->cmount, nodeid,
+						CEPH_RECLAIM_RESET);
+	if (ceph_status)
+		LogEvent(COMPONENT_FSAL, "start_reclaim failed: %d",
+				ceph_status);
+	ceph_finish_reclaim(export->cmount);
+	ceph_set_uuid(export->cmount, nodeid);
+	gsh_free(nodeid);
+	gsh_free(uuid);
+	return 0;
+}
+#undef RECLAIM_UUID_PREFIX
+#else
+static inline int reclaim_reset(struct ceph_export *export)
+{
+	return 0;
+}
+#endif
+
+#ifdef USE_FSAL_CEPH_GET_FS_CID
+static int select_filesystem(struct ceph_export *export)
+{
+	int ceph_status;
+
+	if (export->fs_name) {
+		ceph_status = ceph_select_filesystem(export->cmount,
+						     export->fs_name);
+		if (ceph_status != 0) {
+			LogCrit(COMPONENT_FSAL,
+				"Unable to set filesystem to %s.",
+				export->fs_name);
+			return ceph_status;
+		}
+	}
+	return 0;
+}
+#else /* USE_FSAL_CEPH_GET_FS_CID */
+static int select_filesystem(struct ceph_export *export)
+{
+	if (export->fs_name) {
+		LogCrit(COMPONENT_FSAL,
+			"This libcephfs version doesn't support named filesystems.");
+		return -EINVAL;
+	}
+	return 0;
+}
+#endif /* USE_FSAL_CEPH_GET_FS_CID */
 
 /**
  * @brief Create a new export under this FSAL
@@ -312,6 +393,30 @@ static fsal_status_t create_export(struct fsal_module *module_in,
 		goto error;
 	}
 
+	ceph_status = ceph_init(export->cmount);
+	if (ceph_status != 0) {
+		status.major = ERR_FSAL_SERVERFAULT;
+		LogCrit(COMPONENT_FSAL,
+			"Unable to init Ceph handle for %s.",
+			op_ctx->ctx_export->fullpath);
+		goto error;
+	}
+
+	ceph_status = select_filesystem(export);
+	if (ceph_status != 0) {
+		status.major = ERR_FSAL_SERVERFAULT;
+		goto error;
+	}
+
+	ceph_status = reclaim_reset(export);
+	if (ceph_status != 0) {
+		status.major = ERR_FSAL_SERVERFAULT;
+		LogCrit(COMPONENT_FSAL,
+			"Unable to do reclaim_reset for %s.",
+			op_ctx->ctx_export->fullpath);
+		goto error;
+	}
+
 	ceph_status = ceph_mount(export->cmount, op_ctx->ctx_export->fullpath);
 	if (ceph_status != 0) {
 		status.major = ERR_FSAL_SERVERFAULT;
@@ -320,6 +425,17 @@ static fsal_status_t create_export(struct fsal_module *module_in,
 			op_ctx->ctx_export->fullpath);
 		goto error;
 	}
+
+#ifdef USE_FSAL_CEPH_GET_FS_CID
+	/* Fetch fscid for use in filehandles */
+	export->fscid = ceph_get_fs_cid(export->cmount);
+	if (export->fscid < 0) {
+		status.major = ERR_FSAL_SERVERFAULT;
+		LogCrit(COMPONENT_FSAL,
+			"Error getting fscid for %s.", export->fs_name);
+		goto error;
+	}
+#endif /* USE_FSAL_CEPH_GET_FS_CID */
 
 	enable_delegations(export);
 

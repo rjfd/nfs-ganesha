@@ -1,7 +1,7 @@
 /*
  * vim:noexpandtab:shiftwidth=8:tabstop=8:
  *
- * Copyright 2015-2018 Red Hat, Inc. and/or its affiliates.
+ * Copyright 2015-2019 Red Hat, Inc. and/or its affiliates.
  * Author: Daniel Gryniewicz <dang@redhat.com>
  *
  * This program is free software; you can redistribute it and/or
@@ -194,8 +194,10 @@ struct entry_export_map {
 #define MDCACHE_DIR_POPULATED FSAL_UP_INVALIDATE_DIR_POPULATED
 /** The directory chunks are considered valid */
 #define MDCACHE_TRUST_DIR_CHUNKS FSAL_UP_INVALIDATE_DIR_CHUNKS
-/** The fs locaitons are considered calid */
+/** The fs_locations are considered valid */
 #define MDCACHE_TRUST_FS_LOCATIONS FSAL_UP_INVALIDATE_FS_LOCATIONS
+/** The sec_labels are considered valid */
+#define MDCACHE_TRUST_SEC_LABEL FSAL_UP_INVALIDATE_SEC_LABEL
 /** The entry has been removed, but not unhashed due to state */
 static const uint32_t MDCACHE_UNREACHABLE = 0x100;
 
@@ -344,10 +346,6 @@ struct dir_chunk {
 	/** Number of entries in chunk */
 	int num_entries;
 };
-
-#define mdc_prev_chunk(c) glist_prev_entry(&(c)->parent->fsobj.fsdir.chunks, \
-			struct dir_chunk, chunks, &(c)->chunks)
-
 
 /**
  * @brief Represents a cached directory entry
@@ -704,7 +702,9 @@ mdc_fixup_md(mdcache_entry_t *entry, struct attrlist *attrs)
 	 * attributes. Note that if not all could be provided, we assumed
 	 * that an error occurred.
 	 */
-	if (attrs->request_mask & ~(ATTR_ACL|ATTR4_FS_LOCATIONS))
+	if (attrs->request_mask & ~(ATTR_ACL |
+				    ATTR4_FS_LOCATIONS |
+				    ATTR4_SEC_LABEL))
 		flags |= MDCACHE_TRUST_ATTRS;
 
 	if (attrs->valid_mask == ATTR_RDATTR_ERR) {
@@ -720,6 +720,11 @@ mdc_fixup_md(mdcache_entry_t *entry, struct attrlist *attrs)
 	if (attrs->request_mask & ATTR4_FS_LOCATIONS &&
 		attrs->fs_locations != NULL) {
 		flags |= MDCACHE_TRUST_FS_LOCATIONS;
+	}
+
+	if (attrs->request_mask & ATTR4_SEC_LABEL &&
+		attrs->sec_label.slai_data.slai_data_val != NULL) {
+		flags |= MDCACHE_TRUST_SEC_LABEL;
 	}
 
 	time_t cur_time = time(NULL);
@@ -765,6 +770,9 @@ mdcache_test_attrs_trust(mdcache_entry_t *entry, attrmask_t mask)
 	if (mask & ATTR4_FS_LOCATIONS)
 		flags |= MDCACHE_TRUST_FS_LOCATIONS;
 
+	if (mask & ATTR4_SEC_LABEL)
+		flags |= MDCACHE_TRUST_SEC_LABEL;
+
 	/* If any of the requested attributes are not valid, return. */
 	if (!test_mde_flags(entry, flags))
 		return false;
@@ -783,6 +791,9 @@ mdcache_test_attrs_trust(mdcache_entry_t *entry, attrmask_t mask)
 static inline bool
 mdcache_is_attrs_valid(mdcache_entry_t *entry, attrmask_t mask)
 {
+	bool file_deleg = false;
+	attrmask_t orig_mask = mask;
+
 	if (!mdcache_test_attrs_trust(entry, mask))
 		return false;
 
@@ -793,7 +804,19 @@ mdcache_is_attrs_valid(mdcache_entry_t *entry, attrmask_t mask)
 	    && mdcache_param.getattr_dir_invalidation)
 		return false;
 
-	if ((mask & ~ATTR_ACL) != 0 && entry->attrs.expire_time_attr == 0)
+	file_deleg = (entry->obj_handle.state_hdl &&
+	  entry->obj_handle.state_hdl->file.fdeleg_stats.fds_curr_delegations);
+
+	if (file_deleg) {
+		/* If the file is delegated, then we can trust
+		 * the attributes already fetched (i.e, which
+		 * are in entry->attrs.valid_mask), unless
+		 * expire_time_attr is set to '0'.
+		 */
+		mask = (mask & ~entry->attrs.valid_mask);
+	}
+
+	if ((orig_mask & ~ATTR_ACL) != 0 && entry->attrs.expire_time_attr == 0)
 		return false;
 
 	if ((mask & ~ATTR_ACL) != 0 && entry->attrs.expire_time_attr > 0) {
@@ -804,7 +827,7 @@ mdcache_is_attrs_valid(mdcache_entry_t *entry, attrmask_t mask)
 			return false;
 	}
 
-	if ((mask & ATTR_ACL) != 0 && entry->attrs.expire_time_attr == 0)
+	if ((orig_mask & ATTR_ACL) != 0 && entry->attrs.expire_time_attr == 0)
 		return false;
 
 	if ((mask & ATTR_ACL) != 0 && entry->attrs.expire_time_attr > 0) {

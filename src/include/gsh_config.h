@@ -80,7 +80,7 @@ typedef enum protos {
 #define RQUOTA_PORT 875
 
 /**
- * @brief Default value for core_param.nb_worker
+ * @brief Default value for _9p_param.nb_worker
  */
 #define NB_WORKER_THREAD_DEFAULT 256
 
@@ -213,9 +213,6 @@ typedef struct nfs_core_param {
 	    Rquota_Program.  It is debatable whether this is a
 	    worthwhile option to have. */
 	uint32_t program[P_COUNT];
-	/** Number of worker threads.  Set to NB_WORKER_DEFAULT by
-	    default and changed with the Nb_Worker option. */
-	uint32_t nb_worker;
 	/** For NFSv3, whether to drop rather than reply to requests
 	    yielding I/O errors.  True by default and settable with
 	    Drop_IO_Errors.  As this generally results in client
@@ -362,6 +359,10 @@ typedef struct nfs_core_param {
 	bool enable_FASTSTATS;
 	/** Whether to collect FSAL stats.  Defaults to false. */
 	bool enable_FSALSTATS;
+	/** Whether to collect NFSv3 Detailed stats.  Defaults to false. */
+	bool enable_FULLV3STATS;
+	/** Whether to collect NFSv4 Detailed stats.  Defaults to false. */
+	bool enable_FULLV4STATS;
 	/** Whether tcp sockets should use SO_KEEPALIVE */
 	bool enable_tcp_keepalive;
 	/** Maximum number of TCP probes before dropping the connection */
@@ -389,6 +390,8 @@ typedef struct nfs_core_param {
 	/** Whether to use Pseudo (true) or Path (false) for NFS v3 and 9P
 	    mounts. */
 	bool mount_path_pseudo;
+	/** Whether to disable UDP listeners */
+	bool enable_UDP;
 	/** DBus name prefix. Required if one wants to run multiple ganesha
 	    instances on single host. The prefix should be different for every
 	    ganesha instance. If this is set, dbus name will be
