@@ -48,6 +48,7 @@
 #include "internal.h"
 #include "statx_compat.h"
 #include "sal_functions.h"
+#include "nfs_core.h"
 
 /**
  * @brief Clean up an export
@@ -329,7 +330,7 @@ void ceph_prepare_unexport(struct fsal_export *export_pub)
 	 * return. If we're not a member any longer, then just shutdown
 	 * cleanly.
 	 */
-	if (nfs_grace_is_member())
+	if (admin_shutdown && nfs_grace_is_member())
 		ceph_abort_conn(export->cmount);
 #endif
 }
