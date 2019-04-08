@@ -3,7 +3,7 @@ import os
 project = u'NFS-Ganesha'
 
 def _get_description(fname, base):
-    with open(fname) as f:
+    with open(fname, encoding='utf-8') as f:
         one = None
         while True:
             line = f.readline().rstrip('\n')
